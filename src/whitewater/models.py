@@ -22,6 +22,34 @@ class Cursor(str):
 
 
 @dataclass(frozen=True)
+class ReaderStart:
+    """Where a Reader or Subscription starts consuming a Feed — maps to
+    the WCL ``START AT`` clause. Build with the class factories."""
+
+    wcl: str
+
+    @staticmethod
+    def beginning() -> "ReaderStart":
+        """From the oldest retained record."""
+        return ReaderStart("BEGINNING")
+
+    @staticmethod
+    def now() -> "ReaderStart":
+        """From records appended after creation."""
+        return ReaderStart("NOW")
+
+    @staticmethod
+    def cursor(cursor: Cursor) -> "ReaderStart":
+        """From an opaque Cursor previously returned by the Riverbed."""
+        return ReaderStart("CURSOR '" + str(cursor).replace("'", "''") + "'")
+
+    @staticmethod
+    def timestamp_ns(nanos: int) -> "ReaderStart":
+        """From a signed Unix epoch nanosecond timestamp."""
+        return ReaderStart(f"TIMESTAMP {nanos}")
+
+
+@dataclass(frozen=True)
 class Record:
     cursor: Cursor
     message_id: uuid.UUID

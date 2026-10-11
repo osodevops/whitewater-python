@@ -158,9 +158,9 @@ class Runner:
         client = self.client
         if op == "wcl":
             request_id = uuid.UUID(args["request_id"]) if "request_id" in args else uuid.uuid4()
-            return client.admin.wcl(args["script"], request_id)
+            return client.wcl(args["script"], request_id)
         if op == "admin.commands":
-            return client.admin.commands(args["commands"])
+            return client.commands(args["commands"])
         if op == "feed.append":
             return client.feeds.append(
                 args["feed"],
@@ -399,7 +399,7 @@ def test_conformance(fixture: Path):
         endpoints=[e.strip() for e in ENDPOINTS.split(",")],
     )
     try:
-        assert client.admin.healthy(), "Riverbed must be healthy for conformance"
+        assert client.healthy(), "Riverbed must be healthy for conformance"
         Runner(client).run(fixture)
     finally:
         client.close()

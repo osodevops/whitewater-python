@@ -5,7 +5,6 @@ in the main repository under ``sdk/spec/``.
 """
 
 from .client import (
-    AdminClient,
     FeedClient,
     ReaderSessionClient,
     SubscriptionMemberClient,
@@ -31,6 +30,7 @@ from .models import (
     MemberPage,
     ReaderPage,
     ReaderSession,
+    ReaderStart,
     Record,
     ServerFeedback,
     StatementResult,
@@ -40,7 +40,6 @@ from .models import (
 )
 
 __all__ = [
-    "AdminClient",
     "AmbiguousResult",
     "AppendBatchResult",
     "AppendResult",
@@ -55,6 +54,7 @@ __all__ = [
     "ReaderPage",
     "ReaderSession",
     "ReaderSessionClient",
+    "ReaderStart",
     "Record",
     "Refused",
     "ServerFeedback",

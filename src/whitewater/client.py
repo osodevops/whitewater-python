@@ -1,13 +1,14 @@
-"""Whitewater client facades: Admin, Writer session, Reader session, and
-Subscription member.
+"""Whitewater client facades: resource management, Writer session,
+Reader session, Subscription member, and Feed operations.
 
-All four share one :class:`_transport.Transport`, so endpoint
+All share one :class:`_transport.Transport`, so endpoint
 round-robining and error classification behave identically. Method
 shapes mirror the conformance fixture operation vocabulary.
 """
 
 from __future__ import annotations
 
+import re
 import uuid
 from typing import Any, Dict, List, Optional, Union
 
@@ -24,6 +25,7 @@ from .models import (
     MemberPage,
     ReaderPage,
     ReaderSession,
+    ReaderStart,
     Record,
     TemporaryFetchOptions,
     TemporaryFetchPage,
@@ -32,35 +34,22 @@ from .models import (
 
 UuidLike = Union[uuid.UUID, str]
 
+_DOTTED_RE = re.compile(r"^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)*$")
+_RESOURCE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
 
-class AdminClient:
-    """WCL script execution and Node health."""
 
-    def __init__(self, transport: Transport):
-        self._transport = transport
+def _dotted(name: str) -> str:
+    """Lowercase dotted names (domains, feeds), ≤512 bytes."""
+    if not name or len(name) > 512 or not _DOTTED_RE.match(name):
+        raise ValueError(f"invalid dotted name: {name!r}")
+    return name
 
-    def wcl(self, script: str, request_id: Optional[uuid.UUID] = None) -> ControlExecution:
-        body = {
-            "request_id": str(request_id or uuid.uuid4()),
-            "script": script,
-        }
-        return _wire.control_execution(self._transport.post("/v1/admin/wcl", body))
 
-    def commands(
-        self,
-        commands: List[dict],
-        request_id: Optional[uuid.UUID] = None,
-    ) -> ControlExecution:
-        """Execute typed control commands, e.g.
-        ``[{"command": "show", "kind": "feeds"}]``."""
-        body: Dict[str, Any] = {"commands": commands}
-        if request_id is not None:
-            body["request_id"] = str(request_id)
-        return _wire.control_execution(self._transport.post("/v1/admin/commands", body))
-
-    def healthy(self) -> bool:
-        health = self._transport.get("/health")
-        return isinstance(health, dict) and health.get("status") == "ok"
+def _resource(name: str) -> str:
+    """Single-segment resource names (writers, readers, subscriptions, roles)."""
+    if not name or not _RESOURCE_RE.match(name):
+        raise ValueError(f"invalid resource name: {name!r}")
+    return name
 
 
 class WriterSessionClient:
@@ -337,7 +326,8 @@ class FeedClient:
 
 
 class WhitewaterClient:
-    """Entry point: one transport, five capability facades."""
+    """Entry point: resource management (WCL, typed commands, health) plus
+    the Writer, Reader, Subscription-member, and Feed facades."""
 
     def __init__(
         self,
@@ -346,8 +336,202 @@ class WhitewaterClient:
         timeout: float = 60.0,
     ):
         self._transport = Transport(endpoints, api_key, timeout)
-        self.admin = AdminClient(self._transport)
         self.feeds = FeedClient(self._transport)
+
+    def wcl(self, script: str, request_id: Optional[uuid.UUID] = None) -> ControlExecution:
+        """Execute a WCL script; identical ``request_id`` retries return the
+        original committed execution."""
+        body = {
+            "request_id": str(request_id or uuid.uuid4()),
+            "script": script,
+        }
+        return _wire.control_execution(self._transport.post("/v1/admin/wcl", body))
+
+    def commands(
+        self,
+        commands: List[dict],
+        request_id: Optional[uuid.UUID] = None,
+    ) -> ControlExecution:
+        """Execute typed control commands, e.g.
+        ``[{"command": "show", "kind": "feeds"}]``."""
+        body: Dict[str, Any] = {"commands": commands}
+        if request_id is not None:
+            body["request_id"] = str(request_id)
+        return _wire.control_execution(self._transport.post("/v1/admin/commands", body))
+
+    def healthy(self) -> bool:
+        """Liveness of the contacted Node."""
+        health = self._transport.get("/health")
+        return isinstance(health, dict) and health.get("status") == "ok"
+
+    # ---- Resource management --------------------------------------------------
+    # Typed convenience over :meth:`wcl`: each method builds one WCL statement
+    # and executes it. Names are validated before interpolation, so a bad value
+    # fails locally rather than reaching the Control Plane.
+
+    def create_domain(self, name: str) -> ControlExecution:
+        """``CREATE DOMAIN <name>``"""
+        return self.wcl("CREATE DOMAIN " + _dotted(name))
+
+    def create_feed(self, name: str) -> ControlExecution:
+        """``CREATE FEED <dotted.name>``"""
+        return self.wcl("CREATE FEED " + _dotted(name))
+
+    def create_writer(self, name: str, feed: str) -> ControlExecution:
+        """``CREATE WRITER <name> TO <feed>``"""
+        return self.wcl(f"CREATE WRITER {_resource(name)} TO {_dotted(feed)}")
+
+    def create_reader(
+        self, name: str, feed: str, start: Optional["ReaderStart"] = None
+    ) -> ControlExecution:
+        """``CREATE READER <name> FROM <feed> [START AT <start>]`` — BEGINNING
+        when ``start`` is omitted."""
+        return self._create_from("READER", name, feed, start or ReaderStart.beginning())
+
+    def create_subscription(
+        self, name: str, feed: str, start: Optional["ReaderStart"] = None
+    ) -> ControlExecution:
+        """``CREATE SUBSCRIPTION <name> FROM <feed> [START AT <start>]``"""
+        return self._create_from(
+            "SUBSCRIPTION", name, feed, start or ReaderStart.beginning()
+        )
+
+    def _create_from(
+        self, kind: str, name: str, feed: str, start: "ReaderStart"
+    ) -> ControlExecution:
+        return self.wcl(
+            f"CREATE {kind} {_resource(name)} FROM {_dotted(feed)} START AT {start.wcl}"
+        )
+
+    def create_role(self, name: str) -> ControlExecution:
+        """``CREATE ROLE <name>``"""
+        return self.wcl("CREATE ROLE " + _resource(name))
+
+    def open_writer_session(self, writer: str) -> ControlExecution:
+        """``OPEN WRITER SESSION <name>``; the returned epoch feeds
+        :meth:`writer`."""
+        return self.wcl("OPEN WRITER SESSION " + _resource(writer))
+
+    def seek_reader(self, reader: str, start: "ReaderStart") -> ControlExecution:
+        """``SEEK READER <name> TO <start>`` — repositions a durable Reader."""
+        return self.wcl(f"SEEK READER {_resource(reader)} TO {start.wcl}")
+
+    def describe_domain(self, name: str) -> ControlExecution:
+        """``DESCRIBE DOMAIN <name>``"""
+        return self._describe("DOMAIN", name, True)
+
+    def describe_feed(self, name: str) -> ControlExecution:
+        """``DESCRIBE FEED <dotted.name>``"""
+        return self._describe("FEED", name, True)
+
+    def describe_writer(self, name: str) -> ControlExecution:
+        """``DESCRIBE WRITER <name>``"""
+        return self._describe("WRITER", name, False)
+
+    def describe_reader(self, name: str) -> ControlExecution:
+        """``DESCRIBE READER <name>``"""
+        return self._describe("READER", name, False)
+
+    def describe_subscription(self, name: str) -> ControlExecution:
+        """``DESCRIBE SUBSCRIPTION <name>``"""
+        return self._describe("SUBSCRIPTION", name, False)
+
+    def describe_role(self, name: str) -> ControlExecution:
+        """``DESCRIBE ROLE <name>``"""
+        return self._describe("ROLE", name, False)
+
+    def rename_domain(self, current: str, renamed: str) -> ControlExecution:
+        """``RENAME DOMAIN <current> TO <renamed>``"""
+        return self._rename("DOMAIN", current, renamed, True)
+
+    def rename_feed(self, current: str, renamed: str) -> ControlExecution:
+        """``RENAME FEED <current> TO <renamed>``"""
+        return self._rename("FEED", current, renamed, True)
+
+    def rename_writer(self, current: str, renamed: str) -> ControlExecution:
+        """``RENAME WRITER <current> TO <renamed>``"""
+        return self._rename("WRITER", current, renamed, False)
+
+    def rename_reader(self, current: str, renamed: str) -> ControlExecution:
+        """``RENAME READER <current> TO <renamed>``"""
+        return self._rename("READER", current, renamed, False)
+
+    def rename_subscription(self, current: str, renamed: str) -> ControlExecution:
+        """``RENAME SUBSCRIPTION <current> TO <renamed>``"""
+        return self._rename("SUBSCRIPTION", current, renamed, False)
+
+    def rename_role(self, current: str, renamed: str) -> ControlExecution:
+        """``RENAME ROLE <current> TO <renamed>``"""
+        return self._rename("ROLE", current, renamed, False)
+
+    def drop_domain(self, name: str) -> ControlExecution:
+        """``DROP DOMAIN <name>``"""
+        return self._drop("DOMAIN", name, True)
+
+    def drop_feed(self, name: str) -> ControlExecution:
+        """``DROP FEED <dotted.name>``"""
+        return self._drop("FEED", name, True)
+
+    def drop_writer(self, name: str) -> ControlExecution:
+        """``DROP WRITER <name>``"""
+        return self._drop("WRITER", name, False)
+
+    def drop_reader(self, name: str) -> ControlExecution:
+        """``DROP READER <name>``"""
+        return self._drop("READER", name, False)
+
+    def drop_subscription(self, name: str) -> ControlExecution:
+        """``DROP SUBSCRIPTION <name>``"""
+        return self._drop("SUBSCRIPTION", name, False)
+
+    def drop_role(self, name: str) -> ControlExecution:
+        """``DROP ROLE <name>``"""
+        return self._drop("ROLE", name, False)
+
+    def list_domains(self) -> ControlExecution:
+        """``SHOW DOMAINS`` — rows live in ``results[0].data``."""
+        return self.wcl("SHOW DOMAINS")
+
+    def list_feeds(self) -> ControlExecution:
+        """``SHOW FEEDS``"""
+        return self.wcl("SHOW FEEDS")
+
+    def list_writers(self) -> ControlExecution:
+        """``SHOW WRITERS``"""
+        return self.wcl("SHOW WRITERS")
+
+    def list_readers(self) -> ControlExecution:
+        """``SHOW READERS``"""
+        return self.wcl("SHOW READERS")
+
+    def list_subscriptions(self) -> ControlExecution:
+        """``SHOW SUBSCRIPTIONS``"""
+        return self.wcl("SHOW SUBSCRIPTIONS")
+
+    def list_roles(self) -> ControlExecution:
+        """``SHOW ROLES``"""
+        return self.wcl("SHOW ROLES")
+
+    def list_grants(self) -> ControlExecution:
+        """``SHOW GRANTS``"""
+        return self.wcl("SHOW GRANTS")
+
+    def _describe(self, kind: str, name: str, dotted: bool) -> ControlExecution:
+        return self.wcl(f"DESCRIBE {kind} {self._name(name, dotted)}")
+
+    def _rename(
+        self, kind: str, current: str, renamed: str, dotted: bool
+    ) -> ControlExecution:
+        return self.wcl(
+            f"RENAME {kind} {self._name(current, dotted)} TO {self._name(renamed, dotted)}"
+        )
+
+    def _drop(self, kind: str, name: str, dotted: bool) -> ControlExecution:
+        return self.wcl(f"DROP {kind} {self._name(name, dotted)}")
+
+    @staticmethod
+    def _name(name: str, dotted: bool) -> str:
+        return _dotted(name) if dotted else _resource(name)
 
     def writer(self, name: str, session_epoch: int) -> WriterSessionClient:
         return WriterSessionClient(self._transport, name, session_epoch)

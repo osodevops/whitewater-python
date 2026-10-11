@@ -27,7 +27,7 @@ client = WhitewaterClient(
 
 | Client | Covers |
 |---|---|
-| `client.admin` | WCL script execution via `POST /v1/admin/wcl`, node health |
+| `client` (direct) | WCL + typed command execution (`/v1/admin/wcl`, `/v1/admin/commands`), node health — plus typed resource methods (`create_domain`, `create_feed`, `create_writer`, `create_reader`, `create_subscription`, `describe_feed`, `rename_feed`, `drop_feed`, `list_feeds`, `seek_reader`, `open_writer_session`, …) that build the same WCL for you. `ReaderStart` (`beginning()`, `now()`, `cursor(c)`, `timestamp_ns(ns)`) supplies `START AT` positions |
 | `client.writer(name, epoch)` | Idempotent single and batch appends (`request_id` dedup) |
 | `client.reader(name)` | Named-Reader sessions: open / fetch / ack / close / resume |
 | `client.subscription_member(sub)` | Join, claim, renew, fetch, ack, release under fenced leases |
