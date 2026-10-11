@@ -8,6 +8,8 @@ the wire they travel as decimal strings (JSON numbers lose i64 range).
 
 from __future__ import annotations
 
+import base64
+import threading
 import uuid
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
@@ -26,27 +28,41 @@ class ReaderStart:
     """Where a Reader or Subscription starts consuming a Feed — maps to
     the WCL ``START AT`` clause. Build with the class factories."""
 
-    wcl: str
+    kind: str
+    cursor_value: Optional[Cursor] = None
+    nanos: int = 0
 
     @staticmethod
     def beginning() -> "ReaderStart":
         """From the oldest retained record."""
-        return ReaderStart("BEGINNING")
+        return ReaderStart("beginning")
 
     @staticmethod
     def now() -> "ReaderStart":
         """From records appended after creation."""
-        return ReaderStart("NOW")
+        return ReaderStart("now")
 
     @staticmethod
     def cursor(cursor: Cursor) -> "ReaderStart":
         """From an opaque Cursor previously returned by the Riverbed."""
-        return ReaderStart("CURSOR '" + str(cursor).replace("'", "''") + "'")
+        return ReaderStart("cursor", cursor_value=cursor)
 
     @staticmethod
     def timestamp_ns(nanos: int) -> "ReaderStart":
         """From a signed Unix epoch nanosecond timestamp."""
-        return ReaderStart(f"TIMESTAMP {nanos}")
+        return ReaderStart("timestamp", nanos=nanos)
+
+    @property
+    def wcl(self) -> str:
+        """The WCL ``START AT`` operand, e.g. ``BEGINNING``."""
+        if self.kind == "now":
+            return "NOW"
+        if self.kind == "cursor":
+            escaped = str(self.cursor_value or "").replace("'", "''")
+            return f"CURSOR '{escaped}'"
+        if self.kind == "timestamp":
+            return f"TIMESTAMP {self.nanos}"
+        return "BEGINNING"
 
 
 @dataclass(frozen=True)
@@ -194,3 +210,59 @@ class TemporaryFetchOptions:
 class TemporaryFetchPage:
     records: List[Record]
     next_cursor: Optional[Cursor]
+
+
+class RecordStore:
+    """A named, thread-safe in-memory store of Feed records — the target
+    of ``client.feeds.load(...)`` and a typical sink for
+    ``client.subscribe(...)``::
+
+        store = RecordStore.named("employee-store")
+        client.feeds.load("hr.employees", ReaderStart.beginning(), store)
+        with client.subscribe("hr-view", "hr.employees",
+                              ReaderStart.now(), store.put_all) as sub:
+            ...                 # store stays warm until close()
+
+    Rows key on the record's key bytes; unkeyed records key on their
+    Cursor so every record is retained.
+    """
+
+    def __init__(self, name: str):
+        if not name or not name.strip():
+            raise ValueError("store name is required")
+        self.name = name
+        self._rows: Dict[str, Record] = {}
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def named(name: str) -> "RecordStore":
+        return RecordStore(name)
+
+    def put(self, record: Record) -> None:
+        """Insert or replace the row for this record's key."""
+        with self._lock:
+            self._rows[self._row_key(record)] = record
+
+    def put_all(self, records: List[Record]) -> None:
+        with self._lock:
+            for record in records:
+                self._rows[self._row_key(record)] = record
+
+    def get(self, key: bytes) -> Optional[Record]:
+        """The latest record for a key, when one has been loaded."""
+        with self._lock:
+            return self._rows.get(base64.b64encode(key).decode("ascii"))
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._rows)
+
+    def values(self) -> List[Record]:
+        with self._lock:
+            return list(self._rows.values())
+
+    @staticmethod
+    def _row_key(record: Record) -> str:
+        if record.key is not None:
+            return base64.b64encode(record.key).decode("ascii")
+        return "cursor:" + str(record.cursor)

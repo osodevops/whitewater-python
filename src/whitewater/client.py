@@ -9,12 +9,13 @@ shapes mirror the conformance fixture operation vocabulary.
 from __future__ import annotations
 
 import re
+import threading
 import uuid
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from . import _wire
 from ._transport import Transport
-from .errors import Conflict
+from .errors import AmbiguousResult, Conflict, Refused, Unavailable, WhitewaterError
 from .models import (
     AppendBatchResult,
     AppendResult,
@@ -27,6 +28,7 @@ from .models import (
     ReaderSession,
     ReaderStart,
     Record,
+    RecordStore,
     TemporaryFetchOptions,
     TemporaryFetchPage,
     WorkLease,
@@ -324,6 +326,179 @@ class FeedClient:
             )
         )
 
+    _LOAD_PAGE = 512
+
+    def load(
+        self,
+        feed: str,
+        start: ReaderStart,
+        sink: Union["RecordStore", Callable[[List[Record]], None]],
+    ) -> int:
+        """Bulk-read committed Feed history once, from ``start``, delivering
+        each page to ``sink`` (a RecordStore or a records callback) until the
+        current frontier is drained. Returns the number of records delivered.
+        Use :meth:`WhitewaterClient.subscribe` when the sink should keep
+        receiving.
+
+        ``ReaderStart.now()`` loads nothing (the frontier is empty at call
+        time); ``cursor``/``timestamp_ns`` resume from that point.
+        """
+        deliver: Callable[[List[Record]], None] = (
+            sink.put_all if isinstance(sink, RecordStore) else sink
+        )
+        options = _load_first_page(start)
+        loaded = 0
+        while True:
+            page = self.temporary_fetch(feed, options)
+            if not page.records:
+                return loaded
+            deliver(page.records)
+            loaded += len(page.records)
+            options = TemporaryFetchOptions(
+                after=page.next_cursor, limit=self._LOAD_PAGE
+            )
+
+
+def _load_first_page(start: ReaderStart) -> TemporaryFetchOptions:
+    if start.kind == "now":
+        return TemporaryFetchOptions(new_only=True)
+    if start.kind == "cursor":
+        return TemporaryFetchOptions(after=start.cursor_value, limit=FeedClient._LOAD_PAGE)
+    if start.kind == "timestamp":
+        return TemporaryFetchOptions(
+            after_event_time_ns=start.nanos, limit=FeedClient._LOAD_PAGE
+        )
+    return TemporaryFetchOptions(limit=FeedClient._LOAD_PAGE)
+
+
+class Subscription:
+    """A running feed subscription: a named Reader session polled on a
+    background thread, invoking ``on_records`` per fetched page and
+    acknowledging durable progress after each delivered batch.
+
+    The thread is non-daemon, so a live Subscription keeps the process
+    running — call :meth:`close` (or use a ``with`` block) to exit.
+
+    Error policy: transient refusals (:class:`Unavailable`,
+    :class:`AmbiguousResult`) retry after a short pause.
+    :class:`StaleSession` — another client opened the same Reader —
+    terminates the subscription rather than fencing back. Any other
+    failure also terminates. Terminal errors reach ``on_error`` and
+    :attr:`failure`.
+    """
+
+    _EMPTY_POLL_S = 0.25
+    _RETRY_S = 1.0
+
+    def __init__(
+        self,
+        client: "WhitewaterClient",
+        reader_name: str,
+        feed: str,
+        start: ReaderStart,
+        capacity: int,
+        on_records: Callable[[List[Record]], None],
+        on_error: Optional[Callable[[WhitewaterError], None]],
+    ):
+        self._stop = threading.Event()
+        self._failure: Optional[WhitewaterError] = None
+        self._thread = threading.Thread(
+            target=self._run,
+            args=(client, reader_name, feed, start, capacity, on_records, on_error),
+            name=f"whitewater-subscription-{reader_name}",
+            daemon=False,
+        )
+        self._thread.start()
+
+    @property
+    def running(self) -> bool:
+        """False once the loop has exited (closed or failed)."""
+        return not self._stop.is_set() and self._thread.is_alive()
+
+    @property
+    def failure(self) -> Optional[WhitewaterError]:
+        """The terminal error, when the loop stopped on a failure."""
+        return self._failure
+
+    def close(self) -> None:
+        """Signal stop, release the Reader session, and join the thread."""
+        self._stop.set()
+        self._thread.join(timeout=10)
+
+    def __enter__(self) -> "Subscription":
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self.close()
+
+    def _run(
+        self,
+        client: "WhitewaterClient",
+        reader_name: str,
+        feed: str,
+        start: ReaderStart,
+        capacity: int,
+        on_records: Callable[[List[Record]], None],
+        on_error: Optional[Callable[[WhitewaterError], None]],
+    ) -> None:
+        try:
+            self._ensure_reader(client, reader_name, feed, start)
+            reader = client.reader(reader_name)
+            session = self._open_with_retry(reader, capacity)
+            if session is None:
+                return          # stopped while waiting to open
+            try:
+                while not self._stop.is_set():
+                    try:
+                        page = reader.fetch(session, capacity)
+                        if page.records:
+                            on_records(page.records)
+                            if page.delivered_cursor is not None:
+                                session = reader.ack(session, page.delivered_cursor)
+                        else:
+                            self._stop.wait(self._EMPTY_POLL_S)
+                    except WhitewaterError as error:
+                        if not _retryable(error):
+                            raise
+                        self._stop.wait(self._RETRY_S)
+            finally:
+                try:
+                    reader.close(session)
+                except WhitewaterError:
+                    pass    # Session may already be superseded.
+        except WhitewaterError as error:
+            if not self._stop.is_set():
+                self._failure = error
+                if on_error is not None:
+                    on_error(error)
+        finally:
+            self._stop.set()
+
+    @staticmethod
+    def _ensure_reader(
+        client: "WhitewaterClient", reader_name: str, feed: str, start: ReaderStart
+    ) -> None:
+        """Declare the Reader when missing; an existing Reader is reused."""
+        try:
+            client.create_reader(reader_name, feed, start)
+        except Refused as error:
+            if "exists" not in str(error):
+                raise
+
+    def _open_with_retry(self, reader, capacity: int) -> Optional[ReaderSession]:
+        while not self._stop.is_set():
+            try:
+                return reader.open(capacity)
+            except WhitewaterError as error:
+                if not _retryable(error):
+                    raise
+                self._stop.wait(self._RETRY_S)
+        return None
+
+
+def _retryable(error: WhitewaterError) -> bool:
+    return isinstance(error, (Unavailable, AmbiguousResult))
+
 
 class WhitewaterClient:
     """Entry point: resource management (WCL, typed commands, health) plus
@@ -541,6 +716,34 @@ class WhitewaterClient:
 
     def subscription_member(self, subscription: str) -> SubscriptionMemberClient:
         return SubscriptionMemberClient(self._transport, subscription)
+
+    _SUBSCRIBE_CAPACITY = 128
+
+    def subscribe(
+        self,
+        reader: str,
+        feed: str,
+        start: ReaderStart,
+        on_records: Callable[[List[Record]], None],
+        on_error: Optional[Callable[[WhitewaterError], None]] = None,
+    ) -> "Subscription":
+        """Subscribe durably to a Feed: ensures a Reader named ``reader``
+        exists (creating it at ``start`` when missing), opens a session,
+        and invokes ``on_records`` per fetched page on a background thread,
+        acknowledging after each batch.
+
+        The returned :class:`Subscription` keeps the process running until
+        ``close()`` (or a ``with`` block exits); terminal errors reach
+        ``on_error`` and ``subscription.failure``::
+
+            store = RecordStore.named("employee-store")
+            with client.subscribe("hr-view", "hr.employees",
+                                  ReaderStart.beginning(), store.put_all) as sub:
+                time.sleep(...)             # or just keep working
+        """
+        return Subscription(
+            self, reader, feed, start, self._SUBSCRIBE_CAPACITY, on_records, on_error
+        )
 
     def close(self) -> None:
         self._transport.close()

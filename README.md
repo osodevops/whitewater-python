@@ -31,6 +31,16 @@ client = WhitewaterClient(
 | `client.writer(name, epoch)` | Idempotent single and batch appends (`request_id` dedup) |
 | `client.reader(name)` | Named-Reader sessions: open / fetch / ack / close / resume |
 | `client.subscription_member(sub)` | Join, claim, renew, fetch, ack, release under fenced leases |
+| `client.feeds` | Committed record reads, anonymous temporary fetches (`tail`/`wait_ms`/`new_only`), ad-hoc appends, `load(feed, start, sink)` one-shot history reads |
+| `client.subscribe(reader, feed, start, on_records)` | Managed durable consume: provisions the Reader, runs open → fetch → deliver → ack on a background thread; `sub.close()` (or `with`) to stop. `RecordStore` is a ready-made keyed sink |
+
+```python
+store = RecordStore.named("employee-store")
+client.feeds.load("hr.employees", ReaderStart.beginning(), store)   # bulk fill
+with client.subscribe("hr-view", "hr.employees",
+                      ReaderStart.now(), store.put_all) as sub:     # keep it warm
+    time.sleep(60)                                                  # app stays alive
+```
 
 Errors surface as `WhitewaterError` subtypes mapped from wire `code`
 values (`stale_epoch`, `lease.busy`, `lease.stale_lease`,
