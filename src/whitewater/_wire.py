@@ -16,12 +16,14 @@ from .models import (
     AppendResult,
     ControlExecution,
     Cursor,
+    FeedAppend,
     MemberPage,
     ReaderPage,
     ReaderSession,
     Record,
     ServerFeedback,
     StatementResult,
+    TemporaryFetchPage,
 )
 
 
@@ -140,4 +142,27 @@ def member_page(node: dict) -> MemberPage:
         cursor=Cursor.of(node.get("cursor")),
         positions={k: str(v) for k, v in positions.items()},
         ownership_epoch=node.get("ownership_epoch", 0),
+    )
+
+
+def feed_append_request(feed: str, record: FeedAppend) -> dict:
+    body: Dict[str, Any] = {
+        "request_id": str(record.request_id),
+        "feed": feed,
+        "writer_session_id": str(record.writer_session_id),
+        "writer_epoch": record.writer_epoch,
+        "sequence": record.sequence,
+        "key_base64": b64(record.key if record.key is not None else b""),
+        "payload_base64": b64(record.payload),
+        "metadata_base64": {k: b64(v) for k, v in record.metadata.items()},
+    }
+    if record.event_time_ns is not None:
+        body["event_time_ns"] = str(record.event_time_ns)
+    return body
+
+
+def temporary_fetch_page(node: dict) -> TemporaryFetchPage:
+    return TemporaryFetchPage(
+        records=records(node.get("records")),
+        next_cursor=Cursor.of(node.get("next_cursor")),
     )

@@ -27,8 +27,10 @@ import pytest
 
 from whitewater import (
     Cursor,
+    FeedAppend,
     MemberPage,
     ReaderSession,
+    TemporaryFetchOptions,
     WhitewaterClient,
     WhitewaterError,
     WorkLease,
@@ -157,6 +159,36 @@ class Runner:
         if op == "wcl":
             request_id = uuid.UUID(args["request_id"]) if "request_id" in args else uuid.uuid4()
             return client.admin.wcl(args["script"], request_id)
+        if op == "admin.commands":
+            return client.admin.commands(args["commands"])
+        if op == "feed.append":
+            return client.feeds.append(
+                args["feed"],
+                FeedAppend(
+                    request_id=uuid.UUID(args["request_id"]),
+                    writer_session_id=uuid.UUID(args["writer_session_id"]),
+                    writer_epoch=int(args["writer_epoch"]),
+                    sequence=int(args["sequence"]),
+                    key=self._bytes(args.get("key")),
+                    payload=self._bytes(args.get("payload")),
+                    event_time_ns=int(args["event_time_ns"]) if "event_time_ns" in args else None,
+                    metadata=self._metadata(args.get("metadata")),
+                ),
+            )
+        if op == "reader.temporary_fetch":
+            return client.feeds.temporary_fetch(
+                args["feed"],
+                TemporaryFetchOptions(
+                    after=Cursor(args["after"]) if args.get("after") else None,
+                    limit=args.get("limit"),
+                    new_only=bool(args.get("new_only")),
+                    tail=bool(args.get("tail")),
+                    wait_ms=args.get("wait_ms"),
+                    after_event_time_ns=int(args["after_event_time_ns"])
+                    if "after_event_time_ns" in args
+                    else None,
+                ),
+            )
         if op == "writer.append":
             writer = client.writer(args["writer"], int(args["session_epoch"]))
             return writer.append(
@@ -280,11 +312,14 @@ class Runner:
     # ---- expectations ----
 
     def check_expect(self, expect: Dict[str, Any], result: Any):
-        if "error_code" in expect:
+        if "error_code" in expect or "error_status" in expect:
             assert self.last_error is not None, (
-                f"expected error {expect['error_code']} but the step succeeded"
+                f"expected error {expect} but the step succeeded"
             )
-            assert self.last_error.code == expect["error_code"]
+            if "error_code" in expect:
+                assert self.last_error.code == expect["error_code"]
+            if "error_status" in expect:
+                assert self.last_error.status == expect["error_status"]
             return
         assert self.last_error is None, f"step failed: {self.last_error}"
         for path, expected in expect.items():
@@ -338,6 +373,13 @@ class Runner:
                 result = self.execute(step["op"], args)
             except WhitewaterError as error:
                 self.last_error = error
+            if self.last_error is not None and "expect" not in step:
+                # An unhandled step failure is a scenario failure —
+                # surface it rather than letting downstream tokens
+                # resolve against a null binding and fail confusingly.
+                raise AssertionError(
+                    f"step {index} ({step['op']}) failed: {self.last_error}"
+                )
             if "bind" in step:
                 self.bound[step["bind"]] = _jsonify(result)
             if "expect" in step:
@@ -351,8 +393,10 @@ class Runner:
     "fixture", FIXTURES, ids=[f.stem for f in FIXTURES]
 )
 def test_conformance(fixture: Path):
+    scenario = json.loads(fixture.read_text())
     client = WhitewaterClient(
-        api_key=API_KEY, endpoints=[e.strip() for e in ENDPOINTS.split(",")]
+        api_key=scenario.get("api_key", API_KEY),
+        endpoints=[e.strip() for e in ENDPOINTS.split(",")],
     )
     try:
         assert client.admin.healthy(), "Riverbed must be healthy for conformance"

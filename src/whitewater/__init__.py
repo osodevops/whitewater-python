@@ -6,6 +6,7 @@ in the main repository under ``sdk/spec/``.
 
 from .client import (
     AdminClient,
+    FeedClient,
     ReaderSessionClient,
     SubscriptionMemberClient,
     WhitewaterClient,
@@ -25,6 +26,7 @@ from .models import (
     AppendResult,
     ControlExecution,
     Cursor,
+    FeedAppend,
     Joined,
     MemberPage,
     ReaderPage,
@@ -32,6 +34,8 @@ from .models import (
     Record,
     ServerFeedback,
     StatementResult,
+    TemporaryFetchOptions,
+    TemporaryFetchPage,
     WorkLease,
 )
 
@@ -43,6 +47,8 @@ __all__ = [
     "Conflict",
     "ControlExecution",
     "Cursor",
+    "FeedAppend",
+    "FeedClient",
     "Joined",
     "LeaseConflict",
     "MemberPage",
@@ -55,6 +61,8 @@ __all__ = [
     "StaleSession",
     "StatementResult",
     "SubscriptionMemberClient",
+    "TemporaryFetchOptions",
+    "TemporaryFetchPage",
     "Unavailable",
     "WhitewaterClient",
     "WhitewaterError",

@@ -116,3 +116,53 @@ class MemberPage:
     cursor: Optional[Cursor]
     positions: Dict[str, str]
     ownership_epoch: int
+
+
+@dataclass(frozen=True)
+class FeedAppend:
+    """One ad-hoc append for ``POST /v1/feeds/append``: the caller
+    supplies the writer identity directly instead of holding a named
+    Writer session. Identical ``request_id`` retries dedupe server-side."""
+
+    request_id: uuid.UUID
+    writer_session_id: uuid.UUID
+    writer_epoch: int
+    sequence: int
+    key: Optional[bytes]
+    payload: bytes
+    event_time_ns: Optional[int] = None
+    metadata: Dict[str, bytes] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class TemporaryFetchOptions:
+    """Options for an anonymous temporary Reader fetch. ``after``
+    continues after an opaque Cursor; ``after_event_time_ns`` seeks by
+    record event time; ``new_only`` positions at the current end without
+    returning history; ``tail`` plus ``wait_ms`` long-polls for newly
+    committed records."""
+
+    after: Optional[Cursor] = None
+    limit: Optional[int] = None
+    new_only: bool = False
+    tail: bool = False
+    wait_ms: Optional[int] = None
+    after_event_time_ns: Optional[int] = None
+
+    @staticmethod
+    def page(after: Optional[Cursor] = None, limit: int = 100) -> "TemporaryFetchOptions":
+        return TemporaryFetchOptions(after=after, limit=limit)
+
+    @staticmethod
+    def tailed(after: Optional[Cursor], limit: int, wait_ms: int) -> "TemporaryFetchOptions":
+        return TemporaryFetchOptions(after=after, limit=limit, tail=True, wait_ms=wait_ms)
+
+    @staticmethod
+    def at_end() -> "TemporaryFetchOptions":
+        return TemporaryFetchOptions(new_only=True)
+
+
+@dataclass(frozen=True)
+class TemporaryFetchPage:
+    records: List[Record]
+    next_cursor: Optional[Cursor]

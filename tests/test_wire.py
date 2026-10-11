@@ -72,3 +72,52 @@ def test_feedback_decodes_hot_key_flag_with_default():
     # Older servers omit the field; default is False.
     cold = _wire.feedback({"recommended_batch_count": 100})
     assert cold.hot_key is False
+
+
+def test_feed_append_request_carries_caller_writer_identity():
+    from whitewater import FeedAppend
+
+    body = _wire.feed_append_request(
+        "orders.events",
+        FeedAppend(
+            request_id=uuid.UUID("019a0000-0000-7000-8000-000000000001"),
+            writer_session_id=uuid.UUID("019a0000-0000-7000-8000-000000000009"),
+            writer_epoch=3,
+            sequence=42,
+            key=None,
+            payload=b"p",
+            event_time_ns=2**63 - 1,
+            metadata={"m": b"x"},
+        ),
+    )
+    assert body["feed"] == "orders.events"
+    assert body["writer_session_id"] == "019a0000-0000-7000-8000-000000000009"
+    assert body["writer_epoch"] == 3
+    assert body["sequence"] == 42
+    # The route requires key_base64; an absent key encodes as empty bytes.
+    assert body["key_base64"] == ""
+    assert body["event_time_ns"] == "9223372036854775807"
+    assert body["metadata_base64"] == {"m": "eA=="}
+
+
+def test_temporary_fetch_page_decodes_records_and_next_cursor():
+    page = _wire.temporary_fetch_page(
+        {
+            "records": [
+                {
+                    "cursor": "AAAA",
+                    "message_id": "019a0000-0000-7000-8000-000000000002",
+                    "producer_id": "019a0000-0000-7000-8000-000000000003",
+                    "sequence": 1,
+                    "event_time_ns": "0",
+                    "ingest_time_ns": "1",
+                    "payload_base64": "AA==",
+                }
+            ],
+            "next_cursor": "TSLWCDHsmGBMXtKGSBS3vfBmPrsJnt1cYxWFYi4TpTA",
+        }
+    )
+    assert len(page.records) == 1
+    assert page.records[0].event_time_ns == 0
+    assert page.next_cursor == "TSLWCDHsmGBMXtKGSBS3vfBmPrsJnt1cYxWFYi4TpTA"
+    assert _wire.temporary_fetch_page({}).next_cursor is None

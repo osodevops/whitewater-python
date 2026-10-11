@@ -9,7 +9,7 @@ shapes mirror the conformance fixture operation vocabulary.
 from __future__ import annotations
 
 import uuid
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from . import _wire
 from ._transport import Transport
@@ -18,10 +18,15 @@ from .models import (
     AppendBatchResult,
     AppendResult,
     ControlExecution,
+    Cursor,
+    FeedAppend,
     Joined,
     MemberPage,
     ReaderPage,
     ReaderSession,
+    Record,
+    TemporaryFetchOptions,
+    TemporaryFetchPage,
     WorkLease,
 )
 
@@ -40,6 +45,18 @@ class AdminClient:
             "script": script,
         }
         return _wire.control_execution(self._transport.post("/v1/admin/wcl", body))
+
+    def commands(
+        self,
+        commands: List[dict],
+        request_id: Optional[uuid.UUID] = None,
+    ) -> ControlExecution:
+        """Execute typed control commands, e.g.
+        ``[{"command": "show", "kind": "feeds"}]``."""
+        body: Dict[str, Any] = {"commands": commands}
+        if request_id is not None:
+            body["request_id"] = str(request_id)
+        return _wire.control_execution(self._transport.post("/v1/admin/commands", body))
 
     def healthy(self) -> bool:
         health = self._transport.get("/health")
@@ -263,8 +280,64 @@ class SubscriptionMemberClient:
         self._transport.post("/v1/subscriptions/members/ack", body)
 
 
+class FeedClient:
+    """Ad-hoc Feed operations: committed record reads, anonymous
+    temporary fetches, and single-shot appends with a caller-supplied
+    writer identity — no named session required."""
+
+    def __init__(self, transport: Transport):
+        self._transport = transport
+
+    def records(
+        self,
+        feed: str,
+        limit: Optional[int] = None,
+        after: Optional[Cursor] = None,
+    ) -> List[Record]:
+        """Committed record history via ``GET /v1/feeds/records``."""
+        path = "/v1/feeds/records?feed=" + feed
+        if limit is not None:
+            path += "&limit=" + str(limit)
+        if after is not None:
+            path += "&after=" + str(after)
+        return _wire.records(self._transport.get(path))
+
+    def temporary_fetch(
+        self,
+        feed: str,
+        options: Optional[TemporaryFetchOptions] = None,
+    ) -> TemporaryFetchPage:
+        """Anonymous temporary Reader fetch: bounded page after a Cursor,
+        ``new_only`` positioning, or ``tail`` + ``wait_ms`` long-poll."""
+        options = options or TemporaryFetchOptions()
+        body: Dict[str, Any] = {"feed": feed}
+        if options.after is not None:
+            body["after"] = str(options.after)
+        if options.limit is not None:
+            body["limit"] = options.limit
+        if options.new_only:
+            body["new_only"] = True
+        if options.tail:
+            body["tail"] = True
+        if options.wait_ms is not None:
+            body["wait_ms"] = options.wait_ms
+        if options.after_event_time_ns is not None:
+            body["after_event_time_ns"] = str(options.after_event_time_ns)
+        return _wire.temporary_fetch_page(
+            self._transport.post("/v1/readers/temporary/fetch", body)
+        )
+
+    def append(self, feed: str, record: FeedAppend) -> AppendResult:
+        """Ad-hoc append; identical ``request_id`` retries dedupe."""
+        return _wire.append_result(
+            self._transport.post(
+                "/v1/feeds/append", _wire.feed_append_request(feed, record)
+            )
+        )
+
+
 class WhitewaterClient:
-    """Entry point: one transport, four capability facades."""
+    """Entry point: one transport, five capability facades."""
 
     def __init__(
         self,
@@ -274,6 +347,7 @@ class WhitewaterClient:
     ):
         self._transport = Transport(endpoints, api_key, timeout)
         self.admin = AdminClient(self._transport)
+        self.feeds = FeedClient(self._transport)
 
     def writer(self, name: str, session_epoch: int) -> WriterSessionClient:
         return WriterSessionClient(self._transport, name, session_epoch)
