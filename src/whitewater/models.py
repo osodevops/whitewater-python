@@ -11,8 +11,9 @@ from __future__ import annotations
 import base64
 import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, NamedTuple, Optional, Union
 
 
 class Cursor(str):
@@ -212,46 +213,149 @@ class TemporaryFetchPage:
     next_cursor: Optional[Cursor]
 
 
+MAX_NAMED_KEYS = 10
+
+
+class StoreEntry(NamedTuple):
+    """A stored row: its primary key and the record value."""
+
+    primary_key: bytes
+    record: Record
+
+
 class RecordStore:
     """A named, thread-safe in-memory store of Feed records — the target
-    of ``client.feeds.load(...)`` and a typical sink for
+    of ``client.load_store(store).from_feed(...)`` and a typical sink for
     ``client.subscribe(...)``::
 
-        store = RecordStore.named("employee-store")
-        client.feeds.load("hr.employees", ReaderStart.beginning(), store)
+        store = (RecordStore.named("employee-store")
+                 .add_key("passport").add_key("department"))
+        client.load_store(store).from_feed(
+            "hr.employees", ReaderStart.beginning(),
+            lambda s, record: s.upsert(record)
+                .with_key(record.key)
+                .with_named_key("passport", record.metadata["pp"]))
         with client.subscribe("hr-view", "hr.employees",
                               ReaderStart.now(), store.put_all) as sub:
             ...                 # store stays warm until close()
 
-    Rows key on the record's key bytes; unkeyed records key on their
-    Cursor so every record is retained.
+    The primary map keys rows on the key chosen by
+    ``upsert(record).with_key(...)`` (the record's own key via
+    ``put``/``put_all``, the Cursor for unkeyed records). Each declared
+    named key maintains a separate postings map — conceptually
+    ``employee-store.passport`` — of value -> primary keys, so named
+    lookups are not unique and return every matching row.
     """
+
+    MAX_NAMED_KEYS = MAX_NAMED_KEYS
 
     def __init__(self, name: str):
         if not name or not name.strip():
             raise ValueError("store name is required")
         self.name = name
         self._rows: Dict[str, Record] = {}
+        self._declared_keys: List[str] = []
+        # named key -> base64 value -> set of primary ids (non-unique).
+        self._named_index: Dict[str, Dict[str, set]] = {}
         self._lock = threading.Lock()
 
     @staticmethod
     def named(name: str) -> "RecordStore":
         return RecordStore(name)
 
+    def add_key(self, named_key: str) -> "RecordStore":
+        """Declare a named secondary key (at most MAX_NAMED_KEYS)."""
+        if not named_key or not named_key.strip():
+            raise ValueError("named key is required")
+        with self._lock:
+            if named_key not in self._named_index:
+                if len(self._declared_keys) >= MAX_NAMED_KEYS:
+                    raise ValueError(
+                        f"a RecordStore supports at most {MAX_NAMED_KEYS} named keys")
+                self._declared_keys.append(named_key)
+                self._named_index[named_key] = {}
+        return self
+
+    @property
+    def named_keys(self) -> List[str]:
+        """The declared named keys, in declaration order."""
+        return list(self._declared_keys)
+
+    def upsert(self, record: Record) -> "Upsert":
+        """Start a row write: choose the primary key and named-key values."""
+        return Upsert(self, record)
+
     def put(self, record: Record) -> None:
         """Insert or replace the row for this record's key."""
-        with self._lock:
-            self._rows[self._row_key(record)] = record
+        self._commit_upsert(record, self._default_id(record), {})
 
     def put_all(self, records: List[Record]) -> None:
-        with self._lock:
-            for record in records:
-                self._rows[self._row_key(record)] = record
+        for record in records:
+            self.put(record)
 
-    def get(self, key: bytes) -> Optional[Record]:
+    def get(self, key: Union[bytes, str]) -> Optional[Record]:
         """The latest record for a key, when one has been loaded."""
         with self._lock:
-            return self._rows.get(base64.b64encode(key).decode("ascii"))
+            return self._rows.get(self._key_id(key))
+
+    def get_by(self, named_key: str, value: Union[bytes, str]) -> List[Record]:
+        """Every row whose named key equals ``value`` — named keys are
+        not unique."""
+        with self._lock:
+            if named_key not in self._named_index:
+                raise ValueError(f"undeclared named key: {named_key}")
+            ids = self._named_index[named_key].get(self._key_id(value), set())
+            return [self._rows[i] for i in ids if i in self._rows]
+
+    def delete(self, key: Union[bytes, str]) -> bool:
+        """Remove the row for a key plus its named-key postings."""
+        with self._lock:
+            row_id = self._key_id(key)
+            if row_id not in self._rows:
+                return False
+            del self._rows[row_id]
+            self._remove_postings(row_id)
+            return True
+
+    def clear(self) -> None:
+        """Empty the primary map and every named-key index."""
+        with self._lock:
+            self._rows.clear()
+            for postings in self._named_index.values():
+                postings.clear()
+
+    def copy(self, target: "RecordStore") -> None:
+        """Copy every row into ``target``, re-attaching named-key
+        postings; missing named keys are declared on the target."""
+        for named_key in self.named_keys:
+            target.add_key(named_key)
+        with self._lock:
+            items = list(self._rows.items())
+            named = {row_id: self._named_values_of(row_id) for row_id, _ in items}
+        for row_id, record in items:
+            target._commit_upsert(record, row_id, named[row_id])
+
+    def for_each(self, fn: Callable[[StoreEntry], None]) -> None:
+        """Apply ``fn`` to a stable snapshot of every row."""
+        for entry in self.entries():
+            fn(entry)
+
+    def for_each_parallel(self, workers: int, fn: Callable[[StoreEntry], None]) -> None:
+        """``for_each`` spread over ``workers`` threads — Python threads
+        interleave I/O-bound work; CPU-bound projections stay GIL-bound."""
+        if workers < 1:
+            raise ValueError("workers must be >= 1")
+        entries = self.entries()
+        if not entries:
+            return
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(fn, entries))
+
+    def entries(self) -> List[StoreEntry]:
+        """A stable snapshot of every stored row."""
+        with self._lock:
+            return [StoreEntry(base64.b64decode(row_id), record)
+                    for row_id, record in self._rows.items()]
 
     def __len__(self) -> int:
         with self._lock:
@@ -261,8 +365,70 @@ class RecordStore:
         with self._lock:
             return list(self._rows.values())
 
+    # -- internals ------------------------------------------------------
+
+    def _commit_upsert(self, record: Record, primary_id: str,
+                       named: Dict[str, bytes]) -> None:
+        with self._lock:
+            self._remove_postings(primary_id)
+            for key, value in named.items():
+                postings = self._named_index.get(key)
+                if postings is None:
+                    raise ValueError(f"undeclared named key: {key}")
+                postings.setdefault(self._key_id(value), set()).add(primary_id)
+            self._rows[primary_id] = record
+
+    def _change_primary(self, old_id: str) -> None:
+        with self._lock:
+            self._rows.pop(old_id, None)
+            self._remove_postings(old_id)
+
+    def _named_values_of(self, primary_id: str) -> Dict[str, bytes]:
+        named: Dict[str, bytes] = {}
+        for key, postings in self._named_index.items():
+            for value_id, ids in postings.items():
+                if primary_id in ids:
+                    named[key] = base64.b64decode(value_id)
+        return named
+
+    def _remove_postings(self, primary_id: str) -> None:
+        for postings in self._named_index.values():
+            for value_id in [v for v, ids in postings.items() if primary_id in ids]:
+                postings[value_id].discard(primary_id)
+                if not postings[value_id]:
+                    del postings[value_id]
+
     @staticmethod
-    def _row_key(record: Record) -> str:
-        if record.key is not None:
-            return base64.b64encode(record.key).decode("ascii")
-        return "cursor:" + str(record.cursor)
+    def _key_id(key: Union[bytes, str]) -> str:
+        if isinstance(key, str):
+            key = key.encode("utf-8")
+        return base64.b64encode(key).decode("ascii")
+
+    def _default_id(self, record: Record) -> str:
+        key = record.key if record.key is not None else f"cursor:{record.cursor}".encode("utf-8")
+        return base64.b64encode(key).decode("ascii")
+
+
+class Upsert:
+    """Row-level write builder returned by ``RecordStore.upsert``."""
+
+    def __init__(self, store: RecordStore, record: Record):
+        self._store = store
+        self._record = record
+        self._primary_id = store._default_id(record)
+        self._named: Dict[str, bytes] = {}
+
+    def with_key(self, key: Union[bytes, str, None]) -> "Upsert":
+        """Choose the row's primary key."""
+        row_id = self._store._key_id(key) if key is not None else self._store._default_id(self._record)
+        if row_id != self._primary_id:
+            self._store._change_primary(self._primary_id)
+            self._primary_id = row_id
+        self._store._commit_upsert(self._record, self._primary_id, self._named)
+        return self
+
+    def with_named_key(self, named_key: str, value: Union[bytes, str]) -> "Upsert":
+        """Add a named-key value (must be declared via ``add_key``)."""
+        self._named[named_key] = value.encode("utf-8") if isinstance(value, str) else bytes(value)
+        self._store._commit_upsert(self._record, self._primary_id, self._named)
+        return self

@@ -745,6 +745,20 @@ class WhitewaterClient:
             self, reader, feed, start, self._SUBSCRIBE_CAPACITY, on_records, on_error
         )
 
+    def load_store(self, store: RecordStore) -> "LoadStore":
+        """Bulk materialization of Feed history into a RecordStore: the
+        ``from_feed`` projection picks each row's primary key and
+        named-key values via ``store.upsert(record)``::
+
+            store = RecordStore.named("employee-store").add_key("passport")
+            loaded = client.load_store(store).from_feed(
+                "hr.employees", ReaderStart.beginning(),
+                lambda s, record: s.upsert(record)
+                    .with_key(record.key)
+                    .with_named_key("passport", record.metadata["pp"]))
+        """
+        return LoadStore(self, store)
+
     def close(self) -> None:
         self._transport.close()
 
@@ -753,3 +767,27 @@ class WhitewaterClient:
 
     def __exit__(self, *exc) -> None:
         self.close()
+
+
+class LoadStore:
+    """The :meth:`WhitewaterClient.load_store` operation builder: bulk
+    materialization of Feed history into a RecordStore."""
+
+    def __init__(self, client: WhitewaterClient, store: RecordStore):
+        self._client = client
+        self._store = store
+
+    def from_feed(
+        self,
+        feed: str,
+        start: ReaderStart,
+        projection: Callable[[RecordStore, Record], None],
+    ) -> int:
+        """Read committed history of ``feed`` from ``start``, invoking
+        ``projection`` per record until the frontier is drained; returns
+        the number of records loaded."""
+        def project(records: List[Record]) -> None:
+            for record in records:
+                projection(self._store, record)
+
+        return self._client.feeds.load(feed, start, project)

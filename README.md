@@ -35,12 +35,26 @@ client = WhitewaterClient(
 | `client.subscribe(reader, feed, start, on_records)` | Managed durable consume: provisions the Reader, runs open → fetch → deliver → ack on a background thread; `sub.close()` (or `with`) to stop. `RecordStore` is a ready-made keyed sink |
 
 ```python
-store = RecordStore.named("employee-store")
-client.feeds.load("hr.employees", ReaderStart.beginning(), store)   # bulk fill
+store = (RecordStore.named("employee-store")
+         .add_key("passport").add_key("department"))              # up to 10 named keys
+
+client.load_store(store).from_feed(
+    "hr.employees", ReaderStart.beginning(),
+    lambda s, record: s.upsert(record)                            # bulk fill, projected
+        .with_key(record.key)
+        .with_named_key("passport", record.metadata["pp"]))
+
+store.get("emp-1")                       # by primary key
+store.get_by("passport", "P123")         # by named key — non-unique, returns a list
+store.for_each_parallel(3, lambda entry: export(entry.record))
+
 with client.subscribe("hr-view", "hr.employees",
                       ReaderStart.now(), store.put_all) as sub:     # keep it warm
     time.sleep(60)                                                  # app stays alive
 ```
+
+`client.feeds.load(feed, start, sink)` remains the lighter one-shot
+read when you don't need named-key projections.
 
 Errors surface as `WhitewaterError` subtypes mapped from wire `code`
 values (`stale_epoch`, `lease.busy`, `lease.stale_lease`,
