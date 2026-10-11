@@ -54,7 +54,8 @@ with client.subscribe("hr-view", "hr.employees",
 ```
 
 `client.feeds.load(feed, start, sink)` remains the lighter one-shot
-read when you don't need named-key projections.
+read when you don't need named-key projections. See
+[docs/stores.md](docs/stores.md) for the full store guide.
 
 Errors surface as `WhitewaterError` subtypes mapped from wire `code`
 values (`stale_epoch`, `lease.busy`, `lease.stale_lease`,
