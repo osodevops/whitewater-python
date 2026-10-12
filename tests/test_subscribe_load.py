@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from whitewater import ReaderStart, RecordStore, StaleSession, WhitewaterClient
+from whitewater import ReaderStart, StaleSession, WhitewaterClient
 
 SESSION = {
     "reader_id": "00000000-0000-7000-8000-000000000004",
@@ -125,7 +125,7 @@ def bodies(state, path):
     ]
 
 
-def test_load_pages_until_empty_and_fills_the_store(stub):
+def test_load_pages_until_empty_and_delivers_to_the_sink(stub):
     state, url, _lock = stub
     state["temporary_pages"] = [
         temporary_page("c1", "r1"),
@@ -133,12 +133,13 @@ def test_load_pages_until_empty_and_fills_the_store(stub):
     ]
     client = WhitewaterClient(api_key="test-key", endpoints=[url])
 
-    store = RecordStore.named("employee-store")
-    loaded = client.feeds.load("hr.employees", ReaderStart.beginning(), store)
+    received = []
+    loaded = client.feeds.load(
+        "hr.employees", ReaderStart.beginning(), received.extend
+    )
 
     assert loaded == 2
-    assert len(store) == 2
-    assert store.get(b"k-r1").cursor == "r1"
+    assert [record.key for record in received] == [b"k-r1", b"k-r2"]
     calls = bodies(state, "/v1/readers/temporary/fetch")
     assert len(calls) == 3
     assert "after" not in calls[0]
@@ -216,64 +217,3 @@ def test_subscribe_reuses_existing_reader_and_reports_stale_session(stub):
     assert isinstance(errors[0], StaleSession)
     assert isinstance(sub.failure, StaleSession)
     sub.close()
-
-
-def test_named_keys_index_rows_non_uniquely_and_delete_cleans_postings(stub):
-    state, url, _lock = stub
-    state["temporary_pages"] = [
-        temporary_page("c2", "r1", "r2"),
-        temporary_page(None),
-    ]
-    client = WhitewaterClient(api_key="test-key", endpoints=[url])
-    store = RecordStore.named("employee-store").add_key("department")
-
-    loaded = client.load_store(store).from_feed(
-        "hr.employees",
-        ReaderStart.beginning(),
-        lambda s, record: s.upsert(record)
-        .with_key(record.key)
-        .with_named_key("department", "eng"),
-    )
-
-    assert loaded == 2
-    assert len(store.get_by("department", "eng")) == 2
-    assert store.get("k-r1").cursor == "r1"
-    with pytest.raises(ValueError, match="undeclared named key"):
-        store.get_by("undeclared", "x")
-
-    assert store.delete("k-r1")
-    assert len(store.get_by("department", "eng")) == 1
-
-    store.clear()
-    assert len(store) == 0
-    assert store.get_by("department", "eng") == []
-
-
-def test_copy_carries_named_postings_and_for_each_parallel_visits_every_row(stub):
-    state, url, _lock = stub
-    state["temporary_pages"] = [
-        temporary_page("c2", "r1", "r2"),
-        temporary_page(None),
-    ]
-    client = WhitewaterClient(api_key="test-key", endpoints=[url])
-    store = RecordStore.named("src").add_key("team")
-    client.load_store(store).from_feed(
-        "hr.employees",
-        ReaderStart.beginning(),
-        lambda s, record: s.upsert(record)
-        .with_key(record.key)
-        .with_named_key("team", str(record.cursor)),
-    )
-
-    target = RecordStore.named("dst")
-    store.copy(target)
-    assert len(target) == 2
-    assert target.named_keys == ["team"]
-    assert len(target.get_by("team", "r1")) == 1
-
-    seen = []
-    store.for_each_parallel(3, lambda entry: (
-        seen.append(entry),
-        entry.primary_key and entry.record.cursor,
-    ))
-    assert len(seen) == 2

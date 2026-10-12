@@ -1,148 +1,116 @@
-# RecordStore and load_store — coding guide
+# StateStore — coding guide
 
-A `RecordStore` is a named, thread-safe, in-memory projection of Feed
-records. Fill it once with `client.load_store(store).from_feed` (bulk
-history) and keep it warm with `client.subscribe` (live tail) — the
-Whitewater equivalent of a local materialized view.
-
-## Store anatomy
-
-Two structures per store:
-
-- **Primary map** — `primary key -> Record`. One row per key; a new row
-  for an existing key replaces it.
-- **Named-key posting maps** — one per declared named key, conceptually
-  `employee-store.passport`: `named value -> set of primary keys`.
-  Named keys are **not unique** — many rows may share one named value,
-  so lookups return a list.
+There is exactly one store: the **node-side StateStore** — durable,
+RF3-replicated, Fjall-backed, and queryable from any Node. The SDK's
+`StateStore` is a thin facade over it: it holds no rows, keeps no local
+projection, and every operation is an HTTP call with freshness evidence.
 
 ```python
-store = (RecordStore.named("employee-store")
-         .add_key("passport")           # declare before use
-         .add_key("department"))        # at most RecordStore.MAX_NAMED_KEYS (10)
+store = (StateStore.named("accounts.employees")
+         .add_key("passport", unique=True)   # one row per value
+         .add_key("department"))             # value -> many rows
+
+client.state_stores.define(store)           # declares on the Control Plane
+                                            # and returns it bound
 ```
 
-`add_key` returns the store for chaining. An eleventh key raises
-`ValueError("a RecordStore supports at most 10 named keys")`; blank
-names raise `ValueError("named key is required")`.
+`add_key` records declaration intent used by `define` — named keys are
+declared at creation; at most `StateStore.MAX_NAMED_KEYS` (10), unique
+or not. A named-key declaration only affects `define`; adding a key to
+an existing store has no effect server-side.
 
-## Loading history: `client.load_store(store).from_feed(...)`
+## Writing
 
 ```python
-loaded = client.load_store(store).from_feed(
-    "hr.employees",
-    ReaderStart.beginning(),            # or .now(), .cursor(c), .timestamp_ns(ns)
-    lambda s, record: s.upsert(record)
-        .with_key(record.key)                          # primary key
-        .with_named_key("passport", record.metadata["pp"])
-        .with_named_key("department", "eng"))          # str values are UTF-8
+store.put(b"user-1", b"profile-1",
+          named={"passport": "P111", "department": "eng"})
+store.put(b"user-2", b"profile-2",
+          named={"department": "eng"},
+          mutation_id=uuid4())               # caller-owned idempotency
+store.delete(b"user-1")
 ```
 
-Semantics, in order:
+- `put(key, payload, named=...)` commits one journaled `put_row`
+  through the store's RF3 quorum. `key`/`payload` accept `bytes` or
+  `str` (UTF-8).
+- `named` values are **typed**: `str` -> text, `int` -> i64,
+  `bool` -> bool, `bytes` -> bytes, `None` -> null. A list value
+  carries one typed value per posting component. You never hand-encode
+  `getBytes()` for ordinary strings/numbers.
+- Named values must match the store's declared keys — the server
+  refuses undeclared names. `unique` claims arbitrate
+  first-committed-wins by journal order.
+- `mutation_id` is the idempotency identity: retry a timed-out put
+  with the same id and it dedupes; reuse it with different contents
+  and it conflicts.
 
-1. Pages `temporary_fetch` from `start` until the frontier is drained —
-   a **one-shot bounded read**, not a tail.
-2. For every record the projection runs `s.upsert(record)`.
-3. `with_key(bytes|str|None)` chooses the primary key. Defaults to
-   `record.key`; pass anything — a composite `"dept:emp-1"` — and the
-   row re-keys (old postings are stripped first). `None` falls back to
-   the record's own key/cursor.
-4. `with_named_key(name, bytes|str)` attaches one named-key value; call
-   it once per declared key you want indexed. An **undeclared** named
-   key raises `ValueError` — a projection bug fails the load, never
-   silently writes an unindexed row.
-5. Returns the count of records read (not rows written — re-keys
-   replace, they don't duplicate).
-
-Skip `with_named_key` and the row lands in the primary map only —
-fully readable, just not indexable by that named key.
-
-`feeds.load(feed, start, sink)` remains the lighter "dump history"
-path; `sink` may be the store itself (rows key on `record.key`, cursor
-fallback for unkeyed records) or a `records -> None` batch callback.
-
-## Keeping the store warm: `subscribe`
+## Reading
 
 ```python
-def project(records):
-    for r in records:
-        store.upsert(r).with_key(r.key).with_named_key(
-            "department", r.metadata["department"])
+row = store.get(b"user-1")                   # StoreRow | None
+row.payload                                  # bytes
+row.freshness                                # applied_seq / committed_seq
+                                             # / behind / served_by
 
-with client.subscribe("hr-view", "hr.employees",
-                      ReaderStart.now(),          # only new records
-                      project,
-                      on_error=lambda e: print("ended:", e)) as sub:
-    main_work()   # non-daemon thread keeps the process alive
-# leaving the with-block calls sub.close()
+rows = store.get_by("department", "eng")     # StoreRows — every match
+rows.rows                                    # [StoreRow(key, payload, ...)]
+rows.freshness.served_by                     # which Node answered
 ```
 
-Delivery is **at-least-once**: records land in `on_records`, then the
-loop acks `delivered_cursor`. A crash between callback and ack replays —
-make the projection idempotent (upsert semantics already are).
+`get_by(named_key, value)` is the group/list lookup: one non-unique
+named value resolves to **every** primary row carrying it. Pass
+`strict=True` (with optional `wait_ms`) on `get`/`get_by` and the
+serving replica bounded-waits for its applied journal to reach the
+committed frontier rather than answering stale; non-strict reads still
+report `freshness.behind` honestly.
 
-## Reading the store
+## Iterating
 
 ```python
-store.get("emp-1")                     # Record | None (str keys = UTF-8)
-store.get(b"emp-1")                    # bytes overload
-store.get_by("passport", "P123")       # [Record, ...] — every match
-store.get_by("undeclared", "x")        # raises ValueError
-len(store)                             # row count
-store.named_keys                       # declared keys, in order
-store.name                             # "employee-store"
-store.entries()                        # [StoreEntry(primary_key, record)]
-store.values()                         # [Record, ...]
-store.for_each(lambda e: export(e.record))
+for row in store.iterate():                  # every row, primary-key order
+    ...
+page = store.page(limit=256)                 # one bounded page
+page.next_key                                # continuation
+page.pinned_seq                              # journal position the page
+                                             # was pinned to
 ```
 
-## Mutating outside a load
+`iterate` pages `/v1/state-stores/iterate` — the same bounded,
+ordered row set replica catch-up serves — so `pinned_seq` is the
+iteration's freshness evidence.
+
+## Lifecycle
 
 ```python
-store.put(record)                      # primary-key upsert, no named keys
-store.put_all(records)                 # subscribe-ready sink shape
-store.upsert(record).with_key("custom")
-store.delete("emp-1")                  # removes row + all its postings
-store.clear()                          # empties everything
+store.clear()                                # one journaled ClearAll
+client.state_stores.drop(store.name)         # or store.drop()
 ```
 
-`delete` and `clear` strip named-key postings too — a deleted row never
-lingers in a `get_by` result.
+- `clear` empties the store as one durable, idempotent mutation;
+  replicas sweep rows and postings in bounded batches.
+- `drop` tombstones the definition — the name cannot be recreated and
+  every data path refuses. Rows already applied on replicas remain
+  until a bounded reclaim pass.
+- Feed-sourced stores: `client.state_stores.define(spec, source=
+  "accounts.events")` materializes committed Feed history; named keys
+  require a manual store until declared projections exist, and `sync`/
+  `rebuild` are server-side operations, not SDK methods.
 
-## Copying and parallel work
+## What a StateStore facade is **not**
 
-```python
-replica = RecordStore.named("employee-backup")
-store.copy(replica)                    # rows + named postings; declares
-                                       # missing keys on the target
-store.for_each_parallel(3, lambda entry: rebuild(entry))
-```
+- **Not a local store** — there is no in-process copy to drift from
+  the Nodes. Every read goes to a replica; freshness evidence tells
+  you how current it was.
+- **Not unique on non-unique keys** — `get_by` always returns a list.
 
-`for_each_parallel` fans a stable snapshot over a `ThreadPoolExecutor`
-with `max_workers=workers` — **threads, not processes**: they
-interleave I/O-bound work, but CPU-bound callbacks stay serialized by
-the GIL. For CPU-heavy projections, use `multiprocessing` yourself.
-`workers < 1` raises `ValueError`; a callback's exception propagates
-after the pool drains.
-
-## Error handling reference
+## Errors
 
 | Where | Type | Meaning / remedy |
 |---|---|---|
-| `add_key` #11 / blank | `ValueError` | Store key budget (10) or empty name — construction-time contract. |
-| `get_by`/`with_named_key` undeclared | `ValueError` | Programming error — declare the key or fix the name. |
-| `from_feed` mid-read | `WhitewaterError` (usually `Unavailable`) | Transport refused a page; retry the call — re-upserts are idempotent. |
-| `subscribe` transient | retried internally | `Unavailable`/`AmbiguousResult` backoff inside the loop. |
-| `subscribe` terminal | `on_error` + `sub.failure` | `StaleSession` (another client opened your Reader — pick a unique name or take over deliberately), `Refused`, `Conflict`. The loop is dead; inspect, fix, re-subscribe. |
-
-Catch precise subclasses — `except StaleSession:` — and read
-`error.status`/`error.code` for wire detail.
-
-## What a RecordStore is **not**
-
-- **Not durable** — it dies with the process. Rebuild is cheap:
-  `from_feed` from `ReaderStart.beginning()` (or a snapshot Cursor).
-- **Not a server StateStore** — the server-side replicated store model
-  is a separate, later seam. This is the client-side projection.
-- **Not unique on named keys** — `get_by` always returns a list, even
-  when it happens to hold one row.
+| `add_key` #11 / duplicate / blank | `ValueError` | Declaration contract (10-key bound, distinct names). |
+| `define` spec + `source` + named keys | `ValueError` | Named keys need a manual store — checked before the call. |
+| Data op on unbound spec | `ValueError` | `StateStore.named` builds a spec; bind via `define` or `client.state_store(name)`. |
+| Undeclared named key / missing store | `Refused` (400) | Server-side contract — fix the declaration. |
+| `mutation_id` reused differently | `Conflict` (409) | Retry with the original contents or a fresh id. |
+| No quorum / replica down | `Unavailable` (503) | Retry — the journal needs a quorum to commit. |
+| `strict` read can't catch up | `Conflict` (`index_behind`) | Bounded wait expired; retry or drop `strict`. |

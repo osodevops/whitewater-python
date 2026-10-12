@@ -76,16 +76,16 @@ Three shapes, in increasing durability:
 Two managed wrappers sit on top of those primitives:
 
 - **`feeds.load(feed, start, sink)`** — one-shot bulk read: pages
-  `temporary_fetch` from `ReaderStart` until the frontier is drained.
-  `sink` is a `RecordStore` or any `records -> None` callback.
-- **`client.load_store(store).from_feed(feed, start, projection)`** —
-  the same bulk read with a per-record projection: `RecordStore`
-  declares up to 10 named secondary keys (`add_key`), and the callback
-  writes each row via `store.upsert(record).with_key(k).with_named_key(n,
-  v)`. Store ops: `get(key)`, `get_by(named_key, value)` (non-unique —
-  returns a list), `delete`, `clear`, `copy(target)`, `for_each`,
-  `for_each_parallel(workers, fn)` — threads interleave I/O; GIL-bound
-  for CPU work.
+  `temporary_fetch` from `ReaderStart` until the frontier is drained;
+  `sink` is any `records -> None` callback.
+- **`client.state_store(name)` / `StateStore.named(name)`** — the thin
+  facade over the node-side StateStore (durable, RF3, Fjall): declare
+  with `client.state_stores.define(spec)` after `add_key(name, unique=)`
+  (up to 10 named secondary keys), then `put(key, payload, named={...})`
+  with typed values, `get(key, strict=)`, `get_by(named_key, value)`
+  (non-unique — returns `StoreRows`), `delete`, `iterate`, `page`,
+  `clear`, `drop`. The facade holds no rows; reads carry freshness
+  evidence (`applied_seq`/`committed_seq`/`behind`/`served_by`).
 - **`client.subscribe(reader, feed, start, on_records[, on_error])`** —
   a durable consume loop on a background thread: provisions the Reader
   when missing, then `open` → [`fetch` → `on_records` → `ack`] →

@@ -32,25 +32,21 @@ client = WhitewaterClient(
 | `client.reader(name)` | Named-Reader sessions: open / fetch / ack / close / resume |
 | `client.subscription_member(sub)` | Join, claim, renew, fetch, ack, release under fenced leases |
 | `client.feeds` | Committed record reads, anonymous temporary fetches (`tail`/`wait_ms`/`new_only`), ad-hoc appends, `load(feed, start, sink)` one-shot history reads |
-| `client.subscribe(reader, feed, start, on_records)` | Managed durable consume: provisions the Reader, runs open → fetch → deliver → ack on a background thread; `sub.close()` (or `with`) to stop. `RecordStore` is a ready-made keyed sink |
+| `client.subscribe(reader, feed, start, on_records)` | Managed durable consume: provisions the Reader, runs open → fetch → deliver → ack on a background thread; `sub.close()` (or `with`) to stop |
+| `client.state_store(name)` | Thin facade over the node-side StateStore: `put`/`get`/`get_by`/`delete`/`iterate`/`clear`/`drop` with typed named keys and freshness evidence |
 
 ```python
-store = (RecordStore.named("employee-store")
-         .add_key("passport").add_key("department"))              # up to 10 named keys
+store = (client.state_stores.define(
+        StateStore.named("accounts.employees")
+        .add_key("passport", unique=True).add_key("department")))  # up to 10 named keys
 
-client.load_store(store).from_feed(
-    "hr.employees", ReaderStart.beginning(),
-    lambda s, record: s.upsert(record)                            # bulk fill, projected
-        .with_key(record.key)
-        .with_named_key("passport", record.metadata["pp"]))
+store.put(b"user-1", b"profile-1",
+          named={"passport": "P111", "department": "eng"})        # typed values
+rows = store.get_by("department", "eng").rows                    # every match
 
 store.get("emp-1")                       # by primary key
-store.get_by("passport", "P123")         # by named key — non-unique, returns a list
-store.for_each_parallel(3, lambda entry: export(entry.record))
-
-with client.subscribe("hr-view", "hr.employees",
-                      ReaderStart.now(), store.put_all) as sub:     # keep it warm
-    time.sleep(60)                                                  # app stays alive
+store.get_by("passport", "P123")         # by named key — every match
+for row in store.iterate(): export(row)   # primary-key order, bounded pages
 ```
 
 `client.feeds.load(feed, start, sink)` remains the lighter one-shot

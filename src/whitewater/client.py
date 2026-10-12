@@ -17,6 +17,7 @@ from . import _wire
 from ._transport import Transport
 from .errors import AmbiguousResult, Conflict, Refused, Unavailable, WhitewaterError
 from .models import (
+    MAX_NAMED_KEYS,
     AppendBatchResult,
     AppendResult,
     ControlExecution,
@@ -24,11 +25,16 @@ from .models import (
     FeedAppend,
     Joined,
     MemberPage,
+    MutationResult,
+    NamedKey,
     ReaderPage,
     ReaderSession,
     ReaderStart,
     Record,
-    RecordStore,
+    StorePage,
+    StoreRow,
+    StoreRows,
+    StoreValue,
     TemporaryFetchOptions,
     TemporaryFetchPage,
     WorkLease,
@@ -332,27 +338,24 @@ class FeedClient:
         self,
         feed: str,
         start: ReaderStart,
-        sink: Union["RecordStore", Callable[[List[Record]], None]],
+        sink: Callable[[List[Record]], None],
     ) -> int:
         """Bulk-read committed Feed history once, from ``start``, delivering
-        each page to ``sink`` (a RecordStore or a records callback) until the
-        current frontier is drained. Returns the number of records delivered.
-        Use :meth:`WhitewaterClient.subscribe` when the sink should keep
+        each page to ``sink`` until the current frontier is drained. Returns
+        the number of records delivered. Use
+        :meth:`WhitewaterClient.subscribe` when the sink should keep
         receiving.
 
         ``ReaderStart.now()`` loads nothing (the frontier is empty at call
         time); ``cursor``/``timestamp_ns`` resume from that point.
         """
-        deliver: Callable[[List[Record]], None] = (
-            sink.put_all if isinstance(sink, RecordStore) else sink
-        )
         options = _load_first_page(start)
         loaded = 0
         while True:
             page = self.temporary_fetch(feed, options)
             if not page.records:
                 return loaded
-            deliver(page.records)
+            sink(page.records)
             loaded += len(page.records)
             options = TemporaryFetchOptions(
                 after=page.next_cursor, limit=self._LOAD_PAGE
@@ -512,6 +515,7 @@ class WhitewaterClient:
     ):
         self._transport = Transport(endpoints, api_key, timeout)
         self.feeds = FeedClient(self._transport)
+        self.state_stores = StateStoresClient(self._transport)
 
     def wcl(self, script: str, request_id: Optional[uuid.UUID] = None) -> ControlExecution:
         """Execute a WCL script; identical ``request_id`` retries return the
@@ -736,28 +740,18 @@ class WhitewaterClient:
         ``close()`` (or a ``with`` block exits); terminal errors reach
         ``on_error`` and ``subscription.failure``::
 
-            store = RecordStore.named("employee-store")
             with client.subscribe("hr-view", "hr.employees",
-                                  ReaderStart.beginning(), store.put_all) as sub:
+                                  ReaderStart.beginning(), handle_records) as sub:
                 time.sleep(...)             # or just keep working
         """
         return Subscription(
             self, reader, feed, start, self._SUBSCRIBE_CAPACITY, on_records, on_error
         )
 
-    def load_store(self, store: RecordStore) -> "LoadStore":
-        """Bulk materialization of Feed history into a RecordStore: the
-        ``from_feed`` projection picks each row's primary key and
-        named-key values via ``store.upsert(record)``::
-
-            store = RecordStore.named("employee-store").add_key("passport")
-            loaded = client.load_store(store).from_feed(
-                "hr.employees", ReaderStart.beginning(),
-                lambda s, record: s.upsert(record)
-                    .with_key(record.key)
-                    .with_named_key("passport", record.metadata["pp"]))
-        """
-        return LoadStore(self, store)
+    def state_store(self, name: str) -> "StateStore":
+        """A thin facade over the node-side StateStore ``name`` — rows
+        live on the Nodes (RF3 + Fjall); this client holds no state."""
+        return StateStore(self._transport, name)
 
     def close(self) -> None:
         self._transport.close()
@@ -769,25 +763,257 @@ class WhitewaterClient:
         self.close()
 
 
-class LoadStore:
-    """The :meth:`WhitewaterClient.load_store` operation builder: bulk
-    materialization of Feed history into a RecordStore."""
 
-    def __init__(self, client: WhitewaterClient, store: RecordStore):
-        self._client = client
-        self._store = store
 
-    def from_feed(
+class StateStore:
+    """A thin facade over one node-side StateStore — the durable RF3 +
+    Fjall store on the Nodes is the only store; this object holds no
+    rows. Declare it with named keys, then put/get/delete/iterate::
+
+        store = (client.state_store("accounts.employees")
+                 .add_key("passport", unique=True)
+                 .add_key("department"))
+        client.state_stores.define(store)
+
+        store.put(b"user-1", b"profile-1",
+                  named={"passport": "P111", "department": "eng"})
+        store.get(b"user-1")                    # Optional[StoreRow]
+        store.get_by("department", "eng").rows  # every matching row
+        for row in store.iterate(): ...         # primary-key order pages
+        store.clear()
+        client.state_stores.drop(store.name)
+
+    ``add_key`` records declaration intent used by ``define()``; it does
+    not mutate an already-declared store (named keys are declared at
+    creation). Named-key values are typed scalars — ``str``, ``int``,
+    ``bool``, ``bytes``, or ``None``; a list value carries one typed
+    value per posting component.
+    """
+
+    MAX_NAMED_KEYS = MAX_NAMED_KEYS
+
+    def __init__(self, transport: Optional[Transport], name: str):
+        self._transport = transport
+        self.name = _dotted(name)
+        self._named_keys: List[NamedKey] = []
+
+    @staticmethod
+    def named(name: str) -> "StateStore":
+        """An unbound declaration builder for
+        :meth:`StateStoresClient.define`."""
+        return StateStore(None, name)
+
+    def add_key(self, named_key: str, unique: bool = False) -> "StateStore":
+        """Declare a named secondary key for ``define`` (at most
+        ``MAX_NAMED_KEYS``). Non-unique keys map one value to every
+        matching primary row; ``unique`` enforces one row per value."""
+        if not named_key or not named_key.strip():
+            raise ValueError("named key is required")
+        if any(key.name == named_key for key in self._named_keys):
+            raise ValueError(f"duplicate named key: {named_key}")
+        if len(self._named_keys) >= self.MAX_NAMED_KEYS:
+            raise ValueError(
+                f"a StateStore declares at most {self.MAX_NAMED_KEYS} named keys"
+            )
+        self._named_keys.append(NamedKey(name=named_key, unique=unique))
+        return self
+
+    @property
+    def named_keys(self) -> List[NamedKey]:
+        return list(self._named_keys)
+
+    def _bound(self) -> Transport:
+        if self._transport is None:
+            raise ValueError(
+                "unbound StateStore spec — pass it to client.state_stores.define() "
+                "or get a bound facade via client.state_store(name)"
+            )
+        return self._transport
+
+    # ---- data operations -------------------------------------------------
+
+    def put(
         self,
-        feed: str,
-        start: ReaderStart,
-        projection: Callable[[RecordStore, Record], None],
-    ) -> int:
-        """Read committed history of ``feed`` from ``start``, invoking
-        ``projection`` per record until the frontier is drained; returns
-        the number of records loaded."""
-        def project(records: List[Record]) -> None:
-            for record in records:
-                projection(self._store, record)
+        key: Union[bytes, str],
+        payload: Union[bytes, str],
+        named: Optional[Dict[str, Any]] = None,
+        mutation_id: Optional[uuid.UUID] = None,
+    ) -> MutationResult:
+        """Insert or replace one row. ``named`` maps a declared named key
+        to a typed value (or a list for multi-component postings)."""
+        body: Dict[str, Any] = {
+            "store": self.name,
+            "mutation_id": str(mutation_id or uuid.uuid4()),
+            "op": {
+                "kind": "put_row",
+                "key_base64": _wire.b64(_bytes(key)),
+                "payload_base64": _wire.b64(_bytes(payload)),
+            },
+        }
+        if named:
+            body["op"]["named"] = _wire.named_values(named)
+        return _wire.mutation_result(
+            self._bound().post("/v1/state-stores/mutate", body)
+        )
 
-        return self._client.feeds.load(feed, start, project)
+    def get(
+        self,
+        key: Union[bytes, str],
+        strict: bool = False,
+        wait_ms: Optional[int] = None,
+    ) -> Optional[StoreRow]:
+        """Primary-key read with freshness evidence on the returned row.
+        ``strict`` bounded-waits for the serving replica to apply its
+        committed frontier rather than answering stale."""
+        body: Dict[str, Any] = {
+            "store": self.name,
+            "key_base64": _wire.b64(_bytes(key)),
+            "strict": strict,
+        }
+        if wait_ms is not None:
+            body["wait_ms"] = wait_ms
+        response = self._bound().post("/v1/state-stores/lookup", body)
+        if not response.get("found"):
+            return None
+        return StoreRow(
+            key=_bytes(key),
+            payload=_wire.unb64(response["payload_base64"]),
+            applied_cursor=response.get("applied_cursor"),
+            freshness=_wire.store_freshness(response),
+        )
+
+    def get_by(
+        self,
+        named_key: str,
+        value: Union[StoreValue, List[StoreValue]],
+        limit: Optional[int] = None,
+        strict: bool = False,
+        wait_ms: Optional[int] = None,
+    ) -> StoreRows:
+        """Named-key lookup: every primary row the value points at, plus
+        the serving replica's freshness evidence."""
+        values = value if isinstance(value, list) else [value]
+        body: Dict[str, Any] = {
+            "store": self.name,
+            "named_key": named_key,
+            "values": [_wire.index_value(v) for v in values],
+            "strict": strict,
+        }
+        if limit is not None:
+            body["limit"] = limit
+        if wait_ms is not None:
+            body["wait_ms"] = wait_ms
+        return _wire.store_rows(self._bound().post("/v1/state-stores/get-by", body))
+
+    def delete(
+        self, key: Union[bytes, str], mutation_id: Optional[uuid.UUID] = None
+    ) -> MutationResult:
+        body: Dict[str, Any] = {
+            "store": self.name,
+            "mutation_id": str(mutation_id or uuid.uuid4()),
+            "op": {"kind": "delete_row", "key_base64": _wire.b64(_bytes(key))},
+        }
+        return _wire.mutation_result(
+            self._bound().post("/v1/state-stores/mutate", body)
+        )
+
+    def page(
+        self,
+        after_key: Optional[Union[bytes, str]] = None,
+        limit: Optional[int] = None,
+    ) -> StorePage:
+        """One bounded iteration page in primary-key order — the same row
+        set replica transfer serves, pinned to ``pinned_seq``."""
+        body: Dict[str, Any] = {"store": self.name}
+        if after_key is not None:
+            body["after_key_base64"] = _wire.b64(_bytes(after_key))
+        if limit is not None:
+            body["limit"] = limit
+        return _wire.store_page(self._bound().post("/v1/state-stores/iterate", body))
+
+    def iterate(self, limit: Optional[int] = None):
+        """Yield every row in primary-key order across bounded pages."""
+        after: Optional[bytes] = None
+        while True:
+            page = self.page(after_key=after, limit=limit)
+            yield from page.rows
+            if page.next_key is None:
+                return
+            after = page.next_key
+
+    def clear(self, mutation_id: Optional[uuid.UUID] = None) -> MutationResult:
+        """Empty the store as one journaled mutation — durable and
+        idempotent under ``mutation_id`` retries."""
+        body: Dict[str, Any] = {
+            "store": self.name,
+            "mutation_id": str(mutation_id or uuid.uuid4()),
+        }
+        return _wire.mutation_result(
+            self._bound().post("/v1/state-stores/clear", body)
+        )
+
+    def drop(self, request_id: Optional[uuid.UUID] = None) -> ControlExecution:
+        """Tombstone the store: the name cannot be recreated and every
+        data path refuses. Applied rows remain on replicas until reclaim."""
+        body: Dict[str, Any] = {
+            "commands": [
+                {"command": "drop", "kind": "state_store", "name": self.name}
+            ]
+        }
+        if request_id is not None:
+            body["request_id"] = str(request_id)
+        return _wire.control_execution(
+            self._bound().post("/v1/admin/commands", body)
+        )
+
+
+def _bytes(value: Union[bytes, str]) -> bytes:
+    return value.encode("utf-8") if isinstance(value, str) else bytes(value)
+
+
+class StateStoresClient:
+    """Collection-level StateStore operations: declaration and drop. Row
+    operations live on the bound :class:`StateStore` facade returned by
+    ``client.state_store(name)``."""
+
+    def __init__(self, transport: Transport):
+        self._transport = transport
+
+    def define(
+        self,
+        spec: "StateStore",
+        source: Optional[str] = None,
+        request_id: Optional[uuid.UUID] = None,
+    ) -> "StateStore":
+        """Declare ``spec`` on the Control Plane and return it bound to
+        this client. ``source`` names a same-Domain Feed the store
+        materializes from; omitted means a manual store (required when
+        the spec declares named keys)."""
+        if not isinstance(spec, StateStore):
+            raise TypeError("define() takes a StateStore spec — use StateStore.named(name)")
+        if spec.named_keys and source is not None:
+            raise ValueError(
+                "named keys require a manual StateStore until a declared "
+                "source-Feed projection exists"
+            )
+        command: Dict[str, Any] = {
+            "command": "define_state_store",
+            "name": spec.name,
+            "source": {"kind": "feed", "feed": _dotted(source)}
+            if source is not None
+            else {"kind": "manual"},
+            "named_keys": [
+                {"name": key.name, "unique": key.unique} for key in spec.named_keys
+            ],
+        }
+        body: Dict[str, Any] = {"commands": [command]}
+        if request_id is not None:
+            body["request_id"] = str(request_id)
+        _wire.control_execution(self._transport.post("/v1/admin/commands", body))
+        spec._transport = self._transport
+        return spec
+
+    def drop(
+        self, name: str, request_id: Optional[uuid.UUID] = None
+    ) -> ControlExecution:
+        return StateStore(self._transport, name).drop(request_id=request_id)

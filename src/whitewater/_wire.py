@@ -18,11 +18,17 @@ from .models import (
     Cursor,
     FeedAppend,
     MemberPage,
+    MutationResult,
     ReaderPage,
     ReaderSession,
     Record,
     ServerFeedback,
     StatementResult,
+    StoreFreshness,
+    StorePage,
+    StoreRow,
+    StoreRows,
+    StoreValue,
     TemporaryFetchPage,
 )
 
@@ -165,4 +171,80 @@ def temporary_fetch_page(node: dict) -> TemporaryFetchPage:
     return TemporaryFetchPage(
         records=records(node.get("records")),
         next_cursor=Cursor.of(node.get("next_cursor")),
+    )
+
+
+def index_value(value: StoreValue) -> dict:
+    """One typed StateStore/Index value for the wire. ``None`` maps to
+    ``null`` — check ``bool`` before ``int`` (``bool`` is an ``int``)."""
+    if value is None:
+        return {"kind": "null"}
+    if isinstance(value, bool):
+        return {"kind": "bool", "value": value}
+    if isinstance(value, int):
+        return {"kind": "i64", "value": value}
+    if isinstance(value, str):
+        return {"kind": "text", "value": value}
+    if isinstance(value, (bytes, bytearray)):
+        return {"kind": "bytes", "value_base64": b64(bytes(value))}
+    raise TypeError(f"unsupported StateStore value type: {type(value).__name__}")
+
+
+def named_values(named: Dict[str, Any]) -> List[dict]:
+    """``{"department": "eng", "composite": [v1, v2]}`` -> the mutation's
+    ``named`` entries; a list value carries one typed value per posting
+    component."""
+    entries: List[dict] = []
+    for name, value in (named or {}).items():
+        values = value if isinstance(value, list) else [value]
+        entries.append({"name": name, "values": [index_value(v) for v in values]})
+    return entries
+
+
+def mutation_result(body: dict) -> MutationResult:
+    return MutationResult(
+        store_id=uuid.UUID(body["store_id"]),
+        mutation_id=uuid.UUID(body["mutation_id"]),
+        sequence=body["sequence"],
+        deduplicated=body.get("deduplicated", False),
+    )
+
+
+def store_freshness(body: dict) -> StoreFreshness:
+    return StoreFreshness(
+        applied_seq=body["applied_seq"],
+        committed_seq=body["committed_seq"],
+        behind=body.get("behind", False),
+        served_by=body.get("served_by", ""),
+    )
+
+
+def store_row(node: dict) -> StoreRow:
+    return StoreRow(
+        key=unb64(node["key_base64"]),
+        payload=unb64(node["payload_base64"]),
+        applied_cursor=node.get("applied_cursor"),
+    )
+
+
+def store_rows(body: dict) -> StoreRows:
+    freshness = store_freshness(body)
+    rows = [
+        StoreRow(
+            key=row.key,
+            payload=row.payload,
+            applied_cursor=row.applied_cursor,
+            freshness=freshness,
+        )
+        for row in (store_row(node) for node in body.get("rows", []))
+    ]
+    return StoreRows(rows=rows, freshness=freshness)
+
+
+def store_page(body: dict) -> StorePage:
+    return StorePage(
+        rows=[store_row(node) for node in body.get("rows", [])],
+        next_key=unb64(body["next_key_base64"]) if body.get("next_key_base64") else None,
+        pinned_seq=body.get("pinned_seq", 0),
+        served_by=body.get("served_by", ""),
     )
