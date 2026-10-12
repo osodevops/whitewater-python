@@ -59,6 +59,58 @@ Every management call returns `ControlExecution` — `request_id`,
 `revision`, `authority`, `warning`, and one `StatementResult` per WCL
 statement.
 
+### WCL by example
+
+Raw script — several statements commit as one request (one
+`request_id` dedupes the whole batch):
+
+```python
+client.wcl("""
+    CREATE DOMAIN shop;
+    CREATE FEED shop.orders;
+    CREATE WRITER orders-writer TO shop.orders;
+    OPEN WRITER SESSION orders-writer;
+    CREATE READER audit FROM shop.orders START AT BEGINNING;
+    SHOW FEEDS;
+""")
+```
+
+The same calls through the typed builders — each serializes one WCL
+statement and calls `wcl` internally:
+
+```python
+client.create_domain("shop")                       # CREATE DOMAIN shop;
+client.create_feed("shop.orders")                  # CREATE FEED shop.orders;
+client.create_writer("orders-writer", "shop.orders")
+client.open_writer_session("orders-writer")        # epoch comes back in .data
+client.create_reader("audit", "shop.orders", ReaderStart.beginning())
+client.list_feeds()                                # SHOW FEEDS;
+client.seek_reader("audit", ReaderStart.now())     # SEEK READER ... TO NOW;
+client.drop_feed("shop.orders")                    # DROP FEED shop.orders;
+```
+
+`client.commands([...])` is the second door — the typed JSON command
+path for what WCL does not spell. Declaring a StateStore with named
+keys is the current example (there is no `DEFINE STATESTORE` WCL
+statement yet):
+
+```python
+client.commands([{
+    "command": "define_state_store",
+    "name": "accounts.employees",
+    "source": {"kind": "manual"},
+    "named_keys": [
+        {"name": "passport", "unique": True},
+        {"name": "department", "unique": False},
+    ],
+}])
+```
+
+(`client.state_stores.define(spec)` posts exactly this body for you.)
+
+`DROP` is spelled in WCL for every resource including stores:
+`client.wcl("DROP STATESTORE accounts.employees")` ≡ `store.drop()`.
+
 ## Reading
 
 Three shapes, in increasing durability:
