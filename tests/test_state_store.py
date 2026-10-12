@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from whitewater import StateStore, WhitewaterClient
+from whitewater import Extractor, StateStore, WhitewaterClient
 
 COMMANDS_OK = {
     "request_id": "00000000-0000-7000-8000-000000000006",
@@ -115,12 +115,66 @@ def test_define_emits_named_keys_and_binds_the_facade(stub):
     assert store._bound() is not None
 
 
-def test_define_refuses_named_keys_with_a_feed_source(stub):
+def test_define_feed_sourced_named_keys_need_extractors(stub):
     _state, url, _lock = stub
     client = WhitewaterClient(api_key="test-key", endpoints=[url])
-    spec = StateStore.named("accounts.s").add_key("k")
-    with pytest.raises(ValueError, match="manual StateStore"):
-        client.state_stores.define(spec, source="accounts.events")
+    # A feed-sourced named key without a projection is a declaration bug.
+    with pytest.raises(ValueError, match="require an extractor"):
+        client.state_stores.define(
+            StateStore.named("accounts.s").add_key("k"),
+            source="accounts.events",
+        )
+    # An extractor on a manual store is refused — puts carry the values.
+    with pytest.raises(ValueError, match="manual store"):
+        client.state_stores.define(
+            StateStore.named("accounts.m").add_key(
+                "k", extractor=Extractor.metadata("pp")
+            )
+        )
+
+
+def test_define_feed_sourced_emits_extractors(stub):
+    state, url, _lock = stub
+    state["bodies"]["/v1/admin/commands"] = COMMANDS_OK
+    client = WhitewaterClient(api_key="test-key", endpoints=[url])
+
+    spec = (
+        StateStore.named("accounts.tagged")
+        .add_key("passport", unique=True, extractor=Extractor.metadata("pp"))
+        .add_key("department", extractor=Extractor.json("dept"))
+    )
+    store = client.state_stores.define(spec, source="accounts.events")
+
+    commands = bodies(state, "/v1/admin/commands")
+    assert commands == [
+        {
+            "commands": [
+                {
+                    "command": "define_state_store",
+                    "name": "accounts.tagged",
+                    "source": {"kind": "feed", "feed": "accounts.events"},
+                    "named_keys": [
+                        {
+                            "name": "passport",
+                            "unique": True,
+                            "extractor": {"kind": "metadata", "name": "pp"},
+                        },
+                        {
+                            "name": "department",
+                            "unique": False,
+                            "extractor": {
+                                "kind": "projection",
+                                "extractor": "json",
+                                "version": 1,
+                                "field": "dept",
+                            },
+                        },
+                    ],
+                }
+            ]
+        }
+    ]
+    assert store._bound() is not None
 
 
 def test_spec_validation_and_unbound_refusal(stub):

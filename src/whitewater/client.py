@@ -38,6 +38,7 @@ from .models import (
     TemporaryFetchOptions,
     TemporaryFetchPage,
     WorkLease,
+    Extractor,
 )
 
 UuidLike = Union[uuid.UUID, str]
@@ -803,10 +804,18 @@ class StateStore:
         :meth:`StateStoresClient.define`."""
         return StateStore(None, name)
 
-    def add_key(self, named_key: str, unique: bool = False) -> "StateStore":
+    def add_key(
+        self,
+        named_key: str,
+        unique: bool = False,
+        extractor: Optional[Extractor] = None,
+    ) -> "StateStore":
         """Declare a named secondary key for ``define`` (at most
         ``MAX_NAMED_KEYS``). Non-unique keys map one value to every
-        matching primary row; ``unique`` enforces one row per value."""
+        matching primary row; ``unique`` enforces one row per value.
+        ``extractor`` declares how replay projects each source-Feed
+        record to this key's values — required on feed-sourced stores,
+        refused on manual ones."""
         if not named_key or not named_key.strip():
             raise ValueError("named key is required")
         if any(key.name == named_key for key in self._named_keys):
@@ -815,7 +824,9 @@ class StateStore:
             raise ValueError(
                 f"a StateStore declares at most {self.MAX_NAMED_KEYS} named keys"
             )
-        self._named_keys.append(NamedKey(name=named_key, unique=unique))
+        self._named_keys.append(
+            NamedKey(name=named_key, unique=unique, extractor=extractor)
+        )
         return self
 
     @property
@@ -987,14 +998,20 @@ class StateStoresClient:
     ) -> "StateStore":
         """Declare ``spec`` on the Control Plane and return it bound to
         this client. ``source`` names a same-Domain Feed the store
-        materializes from; omitted means a manual store (required when
-        the spec declares named keys)."""
+        materializes from; omitted means a manual store. Feed-sourced
+        named keys must each declare an ``extractor`` so replay can
+        project typed values; extractors on a manual store are refused."""
         if not isinstance(spec, StateStore):
             raise TypeError("define() takes a StateStore spec — use StateStore.named(name)")
-        if spec.named_keys and source is not None:
+        if source is None and any(key.extractor is not None for key in spec.named_keys):
             raise ValueError(
-                "named keys require a manual StateStore until a declared "
-                "source-Feed projection exists"
+                "named-key extractors apply to feed-sourced StateStores; "
+                "manual stores take named values on each put_row mutation"
+            )
+        if source is not None and any(key.extractor is None for key in spec.named_keys):
+            raise ValueError(
+                "feed-sourced named keys require an extractor "
+                "(Extractor.record_key()/metadata()/json())"
             )
         command: Dict[str, Any] = {
             "command": "define_state_store",
@@ -1003,7 +1020,12 @@ class StateStoresClient:
             if source is not None
             else {"kind": "manual"},
             "named_keys": [
-                {"name": key.name, "unique": key.unique} for key in spec.named_keys
+                {
+                    "name": key.name,
+                    "unique": key.unique,
+                    **({"extractor": key.extractor._body} if key.extractor else {}),
+                }
+                for key in spec.named_keys
             ],
         }
         body: Dict[str, Any] = {"commands": [command]}

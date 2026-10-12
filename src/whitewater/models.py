@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, NamedTuple, Optional, Union
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Union
 
 
 class Cursor(str):
@@ -217,15 +217,46 @@ MAX_NAMED_KEYS = 10
 StoreValue = Union[None, bool, int, str, bytes]
 
 
+class Extractor:
+    """How a feed-sourced StateStore projects one committed source record
+    to a named key's typed lookup values — declared on
+    ``StateStore.add_key(..., extractor=)`` and applied by server-side
+    replay. Build with the class factories; manual stores leave it unset
+    and take values on each ``put`` instead."""
+
+    def __init__(self, body: Dict[str, Any]):
+        self._body = body
+
+    @staticmethod
+    def record_key() -> "Extractor":
+        """The source record's application Key."""
+        return Extractor({"kind": "key"})
+
+    @staticmethod
+    def metadata(name: str) -> "Extractor":
+        """A named record Metadata entry."""
+        return Extractor({"kind": "metadata", "name": name})
+
+    @staticmethod
+    def json(field: str) -> "Extractor":
+        """A dotted JSON-path projection over the record payload."""
+        return Extractor(
+            {"kind": "projection", "extractor": "json", "version": 1, "field": field}
+        )
+
+
 @dataclass(frozen=True)
 class NamedKey:
     """One declared secondary key on a StateStore. Non-unique keys map a
     value to every primary row carrying it (the group/list lookup);
     ``unique`` claims enforce one row per value, arbitrated
-    first-committed-wins by the store's journal order."""
+    first-committed-wins by the store's journal order. ``extractor``
+    projects values from a source-Feed record — feed-sourced stores only;
+    manual stores take values on each ``put_row`` mutation."""
 
     name: str
     unique: bool = False
+    extractor: Optional["Extractor"] = None
 
 
 @dataclass(frozen=True)

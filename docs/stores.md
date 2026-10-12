@@ -92,19 +92,40 @@ client.state_stores.drop(store.name)         # or store.drop()
   every data path refuses. Rows already applied on replicas remain
   until a bounded reclaim pass.
 - Feed-sourced stores: `client.state_stores.define(spec, source=
-  "accounts.events")` materializes committed Feed history; named keys
-  require a manual store until declared projections exist, and `sync`/
+  "accounts.events")` materializes committed Feed history; `sync`/
   `rebuild` are server-side operations, not SDK methods.
+
+### Feed-sourced named keys
+
+Named keys on a feed-sourced store declare a projection — how each
+committed source record maps to typed lookup values. Every key carries
+an `Extractor`:
+
+```python
+spec = (StateStore.named("accounts.tagged")
+        .add_key("passport", unique=True, extractor=Extractor.metadata("pp"))
+        .add_key("department", extractor=Extractor.json("dept")))
+store = client.state_stores.define(spec, source="accounts.events")
+```
+
+`Extractor.record_key()` reads the record's key,
+`Extractor.metadata("pp")` a Metadata entry, `Extractor.json("dept")` a
+dotted JSON-path over the payload. Missing fields and unparseable
+payloads project a `Null` posting rather than stalling replay. Manual
+stores omit `extractor` — `put` carries the values per row.
 
 ### WCL and typed commands
 
 Everything above is a convenience over the Control Plane's two doors.
-WCL spells `DROP` for stores (there is no `DEFINE`/`MUTATE` spelling —
-declaration and data ops stay typed):
+WCL spells `DEFINE`, `DROP`, `DESCRIBE`, and `SHOW` for stores (data ops
+stay typed):
 
 ```python
-client.wcl("DROP STATESTORE accounts.employees")
+client.wcl("DEFINE STATESTORE accounts.employees KEYS department, passport UNIQUE")
+client.wcl("DEFINE STATESTORE accounts.tagged FROM FEED accounts.events KEYS passport = METADATA 'pp' UNIQUE, department = JSON 'dept'")
+client.wcl("SHOW STATESTORES")
 client.wcl("DESCRIBE STATESTORE accounts.employees")  # stage incl. "dropped"
+client.wcl("DROP STATESTORE accounts.employees")
 ```
 
 `commands` posts the typed command the facade builds for you:
@@ -129,7 +150,8 @@ client.commands([
 | Where | Type | Meaning / remedy |
 |---|---|---|
 | `add_key` #11 / duplicate / blank | `ValueError` | Declaration contract (10-key bound, distinct names). |
-| `define` spec + `source` + named keys | `ValueError` | Named keys need a manual store — checked before the call. |
+| `define` spec + `source` + bare named keys | `ValueError` | Feed-sourced keys need an `extractor` — checked before the call. |
+| `define` manual spec + `extractor` | `ValueError` | Extractors apply to feed-sourced stores only. |
 | Data op on unbound spec | `ValueError` | `StateStore.named` builds a spec; bind via `define` or `client.state_store(name)`. |
 | Undeclared named key / missing store | `Refused` (400) | Server-side contract — fix the declaration. |
 | `mutation_id` reused differently | `Conflict` (409) | Retry with the original contents or a fresh id. |
