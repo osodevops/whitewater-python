@@ -64,10 +64,14 @@ def _resource(name: str) -> str:
 class WriterSessionClient:
     """One named-Writer session: idempotent appends fenced by epoch."""
 
-    def __init__(self, transport: Transport, writer: str, session_epoch: int):
+    def __init__(self, transport: Transport, writer: str, session_epoch: int, *, compression: bool = False):
         self._transport = transport
         self._writer = writer
         self._session_epoch = session_epoch
+        self._compression = compression
+
+    def use_compression(self, enabled: bool = True) -> "WriterSessionClient":
+        return WriterSessionClient(self._transport, self._writer, self._session_epoch, compression=enabled)
 
     def append(
         self,
@@ -87,6 +91,8 @@ class WriterSessionClient:
             event_time_ns,
             metadata or {},
         )
+        if self._compression:
+            body["use_compression"] = True
         return _wire.append_result(self._transport.post("/v1/writers/append", body))
 
     def append_batch(self, records: List[dict]) -> AppendBatchResult:
@@ -106,6 +112,9 @@ class WriterSessionClient:
                 for r in records
             ]
         }
+        if self._compression:
+            for record in body["records"]:
+                record["use_compression"] = True
         response = self._transport.post("/v1/writers/append-batch", body)
         return AppendBatchResult(
             results=[_wire.append_result(item) for item in response.get("results") or []],
@@ -283,8 +292,12 @@ class FeedClient:
     temporary fetches, and single-shot appends with a caller-supplied
     writer identity — no named session required."""
 
-    def __init__(self, transport: Transport):
+    def __init__(self, transport: Transport, *, compression: bool = False):
         self._transport = transport
+        self._compression = compression
+
+    def use_compression(self, enabled: bool = True) -> "FeedClient":
+        return FeedClient(self._transport, compression=enabled)
 
     def records(
         self,
@@ -327,11 +340,10 @@ class FeedClient:
 
     def append(self, feed: str, record: FeedAppend) -> AppendResult:
         """Ad-hoc append; identical ``request_id`` retries dedupe."""
-        return _wire.append_result(
-            self._transport.post(
-                "/v1/feeds/append", _wire.feed_append_request(feed, record)
-            )
-        )
+        body = _wire.feed_append_request(feed, record)
+        if self._compression:
+            body["use_compression"] = True
+        return _wire.append_result(self._transport.post("/v1/feeds/append", body))
 
     _LOAD_PAGE = 512
 

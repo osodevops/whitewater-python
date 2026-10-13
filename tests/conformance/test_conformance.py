@@ -162,7 +162,7 @@ class Runner:
         if op == "admin.commands":
             return client.commands(args["commands"])
         if op == "feed.append":
-            return client.feeds.append(
+            return client.feeds.use_compression(bool(args.get("use_compression"))).append(
                 args["feed"],
                 FeedAppend(
                     request_id=uuid.UUID(args["request_id"]),
@@ -190,7 +190,7 @@ class Runner:
                 ),
             )
         if op == "writer.append":
-            writer = client.writer(args["writer"], int(args["session_epoch"]))
+            writer = client.writer(args["writer"], int(args["session_epoch"])).use_compression(bool(args.get("use_compression")))
             return writer.append(
                 self._bytes(args.get("key")),
                 self._bytes(args.get("payload")),
@@ -200,7 +200,7 @@ class Runner:
             )
         if op == "writer.append_batch":
             records = args["records"]
-            writer = client.writer(records[0]["writer"], int(records[0]["session_epoch"]))
+            writer = client.writer(records[0]["writer"], int(records[0]["session_epoch"])).use_compression(bool(args.get("use_compression")))
             return writer.append_batch(
                 [
                     {
