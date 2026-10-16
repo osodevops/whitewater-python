@@ -25,17 +25,19 @@ client = WhitewaterClient(
 client.create_domain("demo")
 client.create_feed("demo.tail")
 
+# UTF-8 binding: appended text comes back as text on every fetch.
+tail = client.feed("demo.tail", value_type=str)
+
 after = None  # None -> feed tail position
 
 while True:
     # Blocks up to wait_ms server-side; returns early when records land.
-    page = client.feeds.temporary_fetch(
-        "demo.tail",
+    page = tail.fetch(
         TemporaryFetchOptions.tailed(after, limit=50, wait_ms=2500),
     )
 
-    for record in page.records:
-        print(f"{record.payload.decode()} @ {record.ingest_time_ns}")
+    for message in page.records:
+        print(f"{message.value} @ {message.ingest_time_ns}")
 
     # Continue from the PAGE frontier, not the last record's cursor — the
     # page can be filtered or empty while the frontier still advanced.

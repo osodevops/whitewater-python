@@ -14,6 +14,8 @@ import uuid
 from typing import Any, Callable, Dict, List, Optional, Union
 
 from . import _wire
+from . import codecs
+from .feed import Feed
 from ._transport import Transport
 from .errors import AmbiguousResult, Conflict, Refused, Unavailable, WhitewaterError
 from .models import (
@@ -761,10 +763,63 @@ class WhitewaterClient:
             self, reader, feed, start, self._SUBSCRIBE_CAPACITY, on_records, on_error
         )
 
-    def state_store(self, name: str) -> "StateStore":
-        """A thin facade over the node-side StateStore ``name`` — rows
-        live on the Nodes (RF3 + Fjall); this client holds no state."""
-        return StateStore(self._transport, name)
+    def state_store(
+        self,
+        name: str,
+        key_codec=None,
+        value_codec=None,
+        *,
+        key_type=None,
+        value_type=None,
+    ) -> "StateStore":
+        """A typed facade over the node-side StateStore ``name`` — rows
+        live on the Nodes (RF3 + Fjall); this client holds no state.
+
+        The default binding takes ``str`` keys and ``bytes`` payloads;
+        pass ``value_type``/``value_codec`` (and optionally ``key_type``/
+        ``key_codec``) so the SDK serializes for you::
+
+            store = client.state_store("app.users", value_type=User)
+            store.put("u1", User("matt", "eng"))
+            user = store.get("u1").payload            # decoded — never .encode()
+        """
+        key_codec = key_codec or (
+            codecs.for_type(key_type) if key_type is not None else codecs.utf8()
+        )
+        value_codec = value_codec or (
+            codecs.for_type(value_type) if value_type is not None else codecs.raw()
+        )
+        return StateStore(self._transport, name, key_codec, value_codec)
+
+    def feed(
+        self,
+        name: str,
+        key_codec=None,
+        value_codec=None,
+        *,
+        key_type=None,
+        value_type=None,
+    ) -> "Feed":
+        """A typed facade over Feed ``name`` — the immutable temporal
+        history on the Nodes. The bound codecs serialize on write and
+        deserialize on read::
+
+            orders = client.feed("orders.events", value_type=Order)
+            orders.writer("ingest").append("order-1", order)   # encoded
+            with orders.reader("audit", capacity=64) as reader:
+                order = reader.fetch().records[0].value        # decoded
+
+        Default binding: ``str`` keys + ``bytes`` payloads. Codecs are
+        shared with :meth:`state_store` — ``codecs.utf8()``,
+        ``codecs.raw()``, ``codecs.json_of(T)``, ``codecs.of(enc, dec)``.
+        """
+        key_codec = key_codec or (
+            codecs.for_type(key_type) if key_type is not None else codecs.utf8()
+        )
+        value_codec = value_codec or (
+            codecs.for_type(value_type) if value_type is not None else codecs.raw()
+        )
+        return Feed(self, _dotted(name), key_codec, value_codec)
 
     def close(self) -> None:
         self._transport.close()
@@ -805,16 +860,37 @@ class StateStore:
 
     MAX_NAMED_KEYS = MAX_NAMED_KEYS
 
-    def __init__(self, transport: Optional[Transport], name: str):
+    def __init__(
+        self,
+        transport: Optional[Transport],
+        name: str,
+        key_codec=None,
+        value_codec=None,
+    ):
         self._transport = transport
         self.name = _dotted(name)
         self._named_keys: List[NamedKey] = []
+        self._key_codec = key_codec or codecs.utf8()
+        self._value_codec = value_codec or codecs.raw()
 
     @staticmethod
     def named(name: str) -> "StateStore":
         """An unbound declaration builder for
         :meth:`StateStoresClient.define`."""
         return StateStore(None, name)
+
+    def view(self, key_codec=None, value_codec=None) -> "StateStore":
+        """Rebind the same store under different codecs — no wire call."""
+        return StateStore(
+            self._transport,
+            self.name,
+            key_codec or self._key_codec,
+            value_codec or self._value_codec,
+        )
+
+    def view_types(self, key_type, value_type) -> "StateStore":
+        """``view`` by Python types (``str``/``bytes``/``dict``/classes)."""
+        return self.view(codecs.for_type(key_type), codecs.for_type(value_type))
 
     def add_key(
         self,
@@ -853,12 +929,38 @@ class StateStore:
             )
         return self._transport
 
+    def _decode_row(self, row: StoreRow) -> StoreRow:
+        return StoreRow(
+            key=self._key_codec.decode(row.key) if row.key is not None else None,
+            payload=self._value_codec.decode(row.payload)
+            if row.payload is not None
+            else None,
+            applied_cursor=row.applied_cursor,
+            freshness=row.freshness,
+        )
+
+    def _decode_rows(self, rows: StoreRows) -> StoreRows:
+        return StoreRows(
+            rows=[self._decode_row(row) for row in rows.rows],
+            freshness=rows.freshness,
+        )
+
+    def _decode_page(self, page: StorePage) -> StorePage:
+        return StorePage(
+            rows=[self._decode_row(row) for row in page.rows],
+            next_key=self._key_codec.decode(page.next_key)
+            if page.next_key is not None
+            else None,
+            pinned_seq=page.pinned_seq,
+            served_by=page.served_by,
+        )
+
     # ---- data operations -------------------------------------------------
 
     def put(
         self,
-        key: Union[bytes, str],
-        payload: Union[bytes, str],
+        key,
+        payload,
         named: Optional[Dict[str, Any]] = None,
         mutation_id: Optional[uuid.UUID] = None,
     ) -> MutationResult:
@@ -869,8 +971,8 @@ class StateStore:
             "mutation_id": str(mutation_id or uuid.uuid4()),
             "op": {
                 "kind": "put_row",
-                "key_base64": _wire.b64(_bytes(key)),
-                "payload_base64": _wire.b64(_bytes(payload)),
+                "key_base64": _wire.b64(self._key_codec.encode(key)),
+                "payload_base64": _wire.b64(self._value_codec.encode(payload)),
             },
         }
         if named:
@@ -881,7 +983,7 @@ class StateStore:
 
     def get(
         self,
-        key: Union[bytes, str],
+        key,
         strict: bool = False,
         wait_ms: Optional[int] = None,
     ) -> Optional[StoreRow]:
@@ -890,7 +992,7 @@ class StateStore:
         committed frontier rather than answering stale."""
         body: Dict[str, Any] = {
             "store": self.name,
-            "key_base64": _wire.b64(_bytes(key)),
+            "key_base64": _wire.b64(self._key_codec.encode(key)),
             "strict": strict,
         }
         if wait_ms is not None:
@@ -899,8 +1001,8 @@ class StateStore:
         if not response.get("found"):
             return None
         return StoreRow(
-            key=_bytes(key),
-            payload=_wire.unb64(response["payload_base64"]),
+            key=key,
+            payload=self._value_codec.decode(_wire.unb64(response["payload_base64"])),
             applied_cursor=response.get("applied_cursor"),
             freshness=_wire.store_freshness(response),
         )
@@ -926,15 +1028,15 @@ class StateStore:
             body["limit"] = limit
         if wait_ms is not None:
             body["wait_ms"] = wait_ms
-        return _wire.store_rows(self._bound().post("/v1/state-stores/get-by", body))
+        return self._decode_rows(_wire.store_rows(self._bound().post("/v1/state-stores/get-by", body)))
 
     def delete(
-        self, key: Union[bytes, str], mutation_id: Optional[uuid.UUID] = None
+        self, key, mutation_id: Optional[uuid.UUID] = None
     ) -> MutationResult:
         body: Dict[str, Any] = {
             "store": self.name,
             "mutation_id": str(mutation_id or uuid.uuid4()),
-            "op": {"kind": "delete_row", "key_base64": _wire.b64(_bytes(key))},
+            "op": {"kind": "delete_row", "key_base64": _wire.b64(self._key_codec.encode(key))},
         }
         return _wire.mutation_result(
             self._bound().post("/v1/state-stores/mutate", body)
@@ -942,17 +1044,17 @@ class StateStore:
 
     def page(
         self,
-        after_key: Optional[Union[bytes, str]] = None,
+        after_key=None,
         limit: Optional[int] = None,
     ) -> StorePage:
         """One bounded iteration page in primary-key order — the same row
         set replica transfer serves, pinned to ``pinned_seq``."""
         body: Dict[str, Any] = {"store": self.name}
         if after_key is not None:
-            body["after_key_base64"] = _wire.b64(_bytes(after_key))
+            body["after_key_base64"] = _wire.b64(self._key_codec.encode(after_key))
         if limit is not None:
             body["limit"] = limit
-        return _wire.store_page(self._bound().post("/v1/state-stores/iterate", body))
+        return self._decode_page(_wire.store_page(self._bound().post("/v1/state-stores/iterate", body)))
 
     def iterate(self, limit: Optional[int] = None):
         """Yield every row in primary-key order across bounded pages."""

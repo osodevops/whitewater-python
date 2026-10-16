@@ -4,6 +4,7 @@ Implements the versioned ``whitewater-protocol`` wire contract defined
 in the main repository under ``sdk/spec/``.
 """
 
+from . import codecs
 from .client import (
     FeedClient,
     ReaderSessionClient,
@@ -13,6 +14,15 @@ from .client import (
     SubscriptionMemberClient,
     WhitewaterClient,
     WriterSessionClient,
+)
+from .feed import (
+    Feed,
+    FeedEvent,
+    FeedMessage,
+    FeedPage,
+    FeedReader,
+    FeedReaderPage,
+    FeedWriter,
 )
 from .errors import (
     AmbiguousResult,
@@ -57,8 +67,15 @@ __all__ = [
     "ControlExecution",
     "Cursor",
     "Extractor",
+    "Feed",
     "FeedAppend",
     "FeedClient",
+    "FeedEvent",
+    "FeedMessage",
+    "FeedPage",
+    "FeedReader",
+    "FeedReaderPage",
+    "FeedWriter",
     "Joined",
     "LeaseConflict",
     "MemberPage",
@@ -88,6 +105,7 @@ __all__ = [
     "WhitewaterError",
     "WorkLease",
     "WriterSessionClient",
+    "codecs",
 ]
 
 __version__ = "0.1.0.dev0"

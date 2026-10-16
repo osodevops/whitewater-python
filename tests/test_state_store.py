@@ -222,7 +222,7 @@ def test_put_get_get_by_delete_carry_wire_shapes(stub):
     assert lookup["strict"] is True and lookup["wait_ms"] == 250
 
     rows = store.get_by("department", "eng")
-    assert [r.key for r in rows.rows] == [b"user-1", b"user-2"]
+    assert [r.key for r in rows.rows] == ["user-1", "user-2"]
     assert rows.freshness.served_by == "storage-1"
     get_by = bodies(state, "/v1/state-stores/get-by")[0]
     assert get_by["named_key"] == "department"
@@ -266,7 +266,7 @@ def test_iterate_pages_until_exhausted_then_clear_and_drop(stub):
     store = client.state_store("accounts.employees")
 
     keys = [row.key for row in store.iterate(limit=100)]
-    assert keys == [b"a", b"b"]
+    assert keys == ["a", "b"]
     calls = bodies(state, "/v1/state-stores/iterate")
     assert calls[0]["limit"] == 100 and "after_key_base64" not in calls[0]
     assert calls[1]["after_key_base64"] == base64.b64encode(b"a").decode()

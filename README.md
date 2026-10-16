@@ -31,9 +31,10 @@ client = WhitewaterClient(
 | `client.writer(name, epoch)` | Idempotent single and batch appends (`request_id` dedup) |
 | `client.reader(name)` | Named-Reader sessions: open / fetch / ack / close / resume |
 | `client.subscription_member(sub)` | Join, claim, renew, fetch, ack, release under fenced leases |
-| `client.feeds` | Committed record reads, anonymous temporary fetches (`tail`/`wait_ms`/`new_only`), ad-hoc appends, `load(feed, start, sink)` one-shot history reads |
+| `client.feed(name[, value_type/value_codec])` | **Typed feed facade**: binds `codecs` once so keys/payloads serialize automatically in both directions — `feed.writer(name)` (declares + opens a session), `feed.reader(name, capacity)` (decoded `fetch`/`ack`, context-managed), `feed.fetch`/`records`/`load` (decoded ad-hoc reads), `feed.subscribe` (decoded batches). Same codec vocabulary as `state_store`: `str`/`bytes`/JSON dataclasses out of the box, protobuf/msgpack/custom via `codecs.of` |
+| `client.feeds` | Raw-byte ad-hoc Feed operations: committed record reads, anonymous temporary fetches (`tail`/`wait_ms`/`new_only`), ad-hoc appends, `load(feed, start, sink)` — the escape hatch under `client.feed(...)` |
 | `client.subscribe(reader, feed, start, on_records)` | Managed durable consume: provisions the Reader, runs open → fetch → deliver → ack on a background thread; `sub.close()` (or `with`) to stop |
-| `client.state_store(name)` | Thin facade over the node-side StateStore: `put`/`get`/`get_by`/`delete`/`iterate`/`clear`/`drop` with typed named keys and freshness evidence |
+| `client.state_store(name[, value_type/value_codec])` | Typed facade over the node-side StateStore: `put`/`get`/`get_by`/`delete`/`iterate`/`clear`/`drop` with typed named keys and freshness evidence. `value_type=` maps a class/dataclass to JSON; `value_codec=` binds any `codecs.Codec` |
 
 ```python
 store = (client.state_stores.define(
@@ -50,8 +51,21 @@ for row in store.iterate(): export(row)   # primary-key order, bounded pages
 ```
 
 `client.feeds.load(feed, start, sink)` remains the lighter one-shot
-read when you don't need named-key projections. See
-[docs/stores.md](docs/stores.md) for the full store guide.
+read when you don't need named-key projections. Codecs are shared
+across feeds and stores — bind once, never `.encode()`/`.decode()` in
+application code:
+
+```python
+orders = client.feed("orders.events", value_type=Order)
+orders.writer("ingest").append("order-1", Order("order-1", 42))
+with orders.reader("audit", capacity=64) as reader:
+    order = reader.fetch().records[0].value          # decoded Order
+
+latest = client.state_store("demo.latest", value_type=Order)
+latest.put("order-1", order)                          # same codec seam
+```
+
+See [docs/stores.md](docs/stores.md) for the full store guide.
 
 Errors surface as `WhitewaterError` subtypes mapped from wire `code`
 values (`stale_epoch`, `lease.busy`, `lease.stale_lease`,
