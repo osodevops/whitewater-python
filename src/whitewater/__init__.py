@@ -24,6 +24,17 @@ from .feed import (
     FeedReaderPage,
     FeedWriter,
 )
+from .operations import (
+    DemandReport,
+    DemandRow,
+    HotKey,
+    IndexBound,
+    IndexPage,
+    IndexPredicate,
+    IndexRow,
+    Pipe,
+    PipeInfo,
+)
 from .errors import (
     AmbiguousResult,
     Conflict,
@@ -86,6 +97,15 @@ __all__ = [
     "ReaderSessionClient",
     "ReaderStart",
     "Record",
+    "PipeInfo",
+    "Pipe",
+    "IndexRow",
+    "IndexPredicate",
+    "IndexPage",
+    "IndexBound",
+    "HotKey",
+    "DemandRow",
+    "DemandReport",
     "Refused",
     "ServerFeedback",
     "StaleSession",

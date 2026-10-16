@@ -78,6 +78,42 @@ Cursors are opaque strings: never parsed, ordered, or fabricated.
 and travel as decimal strings on the wire â€” the full signed 64-bit
 nanosecond range round-trips exactly.
 
+## Pipes, indexes, and operations
+
+Managed Pipes and replicated Indexes share the same topology-free
+model — names, never partitions or Nodes:
+
+```python
+# Pipe lifecycle: describe, pause, resume, drop.
+pipe = client.pipe("orders.relay")
+info = pipe.describe()        # stage, operation, outputs, status
+pipe.pause(); pipe.resume(); pipe.drop()
+pipes = client.pipes()        # the declared catalog
+
+# Index queries: exact, prefix, or range predicates over typed values.
+page = client.query_index(
+    "crm.byregion",
+    IndexPredicate.range(
+        ["emea"],
+        IndexBound.inclusive_bound(0),
+        IndexBound.exclusive_bound(99)),
+    limit=50, strict=True)
+for row in page.rows:         # row.key / row.payload bytes
+    ...
+
+# Demand observability: typed rows + per-domain rollups.
+report = client.demand_feeds()
+appended = report.rows[0].counter("appended_records")
+client.demand_readers(); client.demand_subscriptions()
+client.demand_indexes();  client.demand_pipes()
+hot = client.hot_keys()       # dominant-key evidence per feed
+```
+
+Pipe operation payloads and demand counter fields stay opaque dicts so
+server-side variants evolve without an SDK bump; `query_index` typed
+values lower automatically (`str`/`int`/`bool`/`None`/`bytes`).
+
+
 ## Test
 
 ```bash

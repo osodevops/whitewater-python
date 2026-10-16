@@ -833,6 +833,94 @@ class WhitewaterClient:
 
 
 
+    # ---- Pipe lifecycle ------------------------------------------------
+
+    def pipe(self, name: str) -> "Pipe":
+        """Bind a declared Pipe for lifecycle operations:
+        ``describe``/``pause``/``resume``/``drop``."""
+        from .operations import Pipe
+        return Pipe(self, name)
+
+    def pipes(self) -> List["PipeInfo"]:
+        """``SHOW PIPES``: the catalog of declared Pipes."""
+        from .operations import decode_pipes
+        execution = self.commands([{"command": "show", "kind": "pipes"}])
+        data = execution.results[0].data if execution.results else {}
+        rows = data.get("rows", data) if isinstance(data, dict) else data
+        return decode_pipes(rows)
+
+    # ---- Index queries --------------------------------------------------
+
+    def query_index(
+        self,
+        index: str,
+        predicate: "IndexPredicate",
+        limit: Optional[int] = None,
+        strict: bool = False,
+        wait_ms: Optional[int] = None,
+    ) -> "IndexPage":
+        """Query a replicated Index by ``IndexPredicate`` — exact, prefix,
+        or range over typed values. ``strict`` waits for the committed
+        target rather than answering stale; ``wait_ms`` bounds that wait."""
+        body: Dict[str, Any] = {"index": _dotted(index)}
+        body.update(predicate.wire_fields())
+        body["strict"] = strict
+        if limit is not None:
+            body["limit"] = limit
+        if wait_ms is not None:
+            body["wait_ms"] = wait_ms
+        from .operations import decode_index_page
+        return decode_index_page(
+            self._transport.post("/v1/indexes/query", body))
+
+    # ---- Demand observability -------------------------------------------
+
+    def demand_feeds(self) -> "DemandReport":
+        """``GET /v1/admin/demand/feeds`` — per-Feed append/read
+        attribution plus per-domain rollups."""
+        from .operations import decode_demand_report
+        return decode_demand_report(
+            self._transport.get("/v1/admin/demand/feeds"), "feeds", "feed")
+
+    def demand_readers(self) -> "DemandReport":
+        """``GET /v1/admin/demand/readers`` — per-Reader request/fetch/ack
+        counters."""
+        from .operations import decode_demand_report
+        return decode_demand_report(
+            self._transport.get("/v1/admin/demand/readers"),
+            "readers", "reader")
+
+    def demand_subscriptions(self) -> "DemandReport":
+        """``GET /v1/admin/demand/subscriptions`` — per-Subscription
+        counters."""
+        from .operations import decode_demand_report
+        return decode_demand_report(
+            self._transport.get("/v1/admin/demand/subscriptions"),
+            "subscriptions", "subscription")
+
+    def demand_indexes(self) -> "DemandReport":
+        """``GET /v1/admin/demand/indexes`` — per-Index query counters."""
+        from .operations import decode_demand_report
+        return decode_demand_report(
+            self._transport.get("/v1/admin/demand/indexes"),
+            "indexes", "index")
+
+    def demand_pipes(self) -> "DemandReport":
+        """``GET /v1/admin/demand/pipes`` — per-Pipe drive/apply/failure
+        counters."""
+        from .operations import decode_demand_report
+        return decode_demand_report(
+            self._transport.get("/v1/admin/demand/pipes"), "pipes", "pipe")
+
+    def hot_keys(self) -> List["HotKey"]:
+        """``GET /v1/admin/demand/hot-keys`` — dominant-Key evidence
+        across Feeds. A strictly ordered hot Key is never parallelized:
+        the honest signal is to spread or shed load for the Key."""
+        from .operations import decode_hot_keys
+        return decode_hot_keys(
+            self._transport.get("/v1/admin/demand/hot-keys"))
+
+
 class StateStore:
     """A thin facade over one node-side StateStore — the durable RF3 +
     Fjall store on the Nodes is the only store; this object holds no
