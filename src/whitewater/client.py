@@ -745,6 +745,7 @@ class WhitewaterClient:
         start: ReaderStart,
         on_records: Callable[[List[Record]], None],
         on_error: Optional[Callable[[WhitewaterError], None]] = None,
+        capacity: Optional[int] = None,
     ) -> "Subscription":
         """Subscribe durably to a Feed: ensures a Reader named ``reader``
         exists (creating it at ``start`` when missing), opens a session,
@@ -760,7 +761,13 @@ class WhitewaterClient:
                 time.sleep(...)             # or just keep working
         """
         return Subscription(
-            self, reader, feed, start, self._SUBSCRIBE_CAPACITY, on_records, on_error
+            self,
+            reader,
+            feed,
+            start,
+            capacity or self._SUBSCRIBE_CAPACITY,
+            on_records,
+            on_error,
         )
 
     def state_store(
@@ -1117,6 +1124,38 @@ class StateStore:
         if wait_ms is not None:
             body["wait_ms"] = wait_ms
         return self._decode_rows(_wire.store_rows(self._bound().post("/v1/state-stores/get-by", body)))
+
+    def find(
+        self,
+        key,
+        strict: bool = False,
+        wait_ms: Optional[int] = None,
+    ) -> Any:
+        """Primary-key lookup returning just the decoded value — ``None``
+        when the key is absent. :meth:`get` remains for the row's
+        freshness/applied-cursor evidence."""
+        row = self.get(key, strict=strict, wait_ms=wait_ms)
+        return None if row is None else row.payload
+
+    def find_by(
+        self,
+        named_key: str,
+        value: StoreValue,
+        strict: bool = False,
+        wait_ms: Optional[int] = None,
+    ) -> Any:
+        """Named-key lookup returning the first matching row's decoded
+        value — ``None`` on no match. :meth:`get_by` remains for every
+        match plus freshness evidence."""
+        rows = self.get_by(named_key, value, limit=1,
+                           strict=strict, wait_ms=wait_ms)
+        return rows.rows[0].payload if rows.rows else None
+
+    def get_or_default(self, key, default) -> Any:
+        """Primary lookup returning ``default`` when the key is absent —
+        counters and flags become one line."""
+        row = self.get(key)
+        return default if row is None else row.payload
 
     def delete(
         self, key, mutation_id: Optional[uuid.UUID] = None

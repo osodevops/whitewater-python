@@ -19,6 +19,9 @@ serialize automatically in both directions::
 
 from __future__ import annotations
 
+import queue
+import threading
+import time
 import uuid
 from dataclasses import dataclass, field, replace
 from typing import Callable, Dict, Generic, List, Optional, TypeVar, Union
@@ -423,17 +426,44 @@ class Feed(Generic[K, V]):
         start: ReaderStart,
         on_records: Callable[[List[FeedMessage[K, V]]], None],
         on_error: Optional[Callable[[WhitewaterError], None]] = None,
+        capacity: Optional[int] = None,
     ):
         """A running subscription on this Feed: a named Reader polled on
         a background thread, delivering decoded batches and acknowledging
         durable progress after each."""
+        return self._subscribe_decoded(
+            reader, start, capacity, on_records, on_error)
+
+    def _subscribe_decoded(
+        self,
+        reader: str,
+        start: ReaderStart,
+        capacity: Optional[int],
+        on_records: Callable[[List[FeedMessage[K, V]]], None],
+        on_error: Optional[Callable[[WhitewaterError], None]],
+    ):
         return self._client.subscribe(
             reader,
             self.name,
             start,
             lambda records: on_records([self._decode(r) for r in records]),
             on_error,
+            capacity=capacity,
         )
+
+    def consumer(self, reader: str) -> "FeedConsumer[K, V]":
+        """A permanent, supervised consumer bound to this Feed's named
+        Reader — per-record delivery, internal restart/backoff, durable
+        progress, graceful close. Iterate it or :meth:`run` a handler::
+
+            for msg in feed.consumer("enricher"):
+                process(msg)
+
+            feed.consumer("enricher").on_record(process).run()
+
+        See :class:`FeedConsumer`.
+        """
+        return FeedConsumer(self, reader)
 
     # ---- views -----------------------------------------------------------
 
@@ -494,3 +524,231 @@ class Feed(Generic[K, V]):
                 f"open_writer_session returned no session_epoch for {writer_name}"
             )
         return epoch
+
+
+_SENTINEL = object()
+
+
+class FeedConsumer(Generic[K, V]):
+    """A permanent, supervised consumer: the durable-Reader equivalent
+    of Kafka's ``while True: consumer.poll(...)`` loop, with the
+    plumbing removed::
+
+        for msg in feed.consumer("enricher"):
+            process(msg)
+
+        # or a handler:
+        consumer = feed.consumer("enricher").on_record(process)
+        consumer.run()          # blocks until close()
+
+    Semantics:
+
+    - The named Reader's acked cursor is durable server-side — a restart
+      (app or session) resumes where it stopped; no offset management.
+    - Each fetched page is delivered record-by-record; the page's
+      delivered cursor is acknowledged only after the handler returns —
+      a handler exception leaves the page unacked so it redelivers
+      (at-least-once). In ``for`` form, an exception in the loop body
+      has the same effect: the page was not acked.
+    - Transient failures retry with exponential backoff inside the
+      supervisor; a dead session re-opens and resumes. :meth:`run`
+      raises only for startup refusals (misconfiguration, denied auth)
+      — everything after a successful first open is supervised forever
+      until :meth:`close`.
+    - :meth:`close` finishes the in-flight page, closes the session,
+      and lets ``run()``/iteration return — the SIGTERM path.
+    """
+
+    _POLL_S = 0.05
+
+    def __init__(self, feed: Feed[K, V], reader: str):
+        self._feed = feed
+        self._reader = reader
+        self._start = ReaderStart.beginning()
+        self._capacity: Optional[int] = None
+        self._initial_backoff = 0.25
+        self._max_backoff = 30.0
+        self._on_record: Optional[Callable[[FeedMessage[K, V]], None]] = None
+        self._on_error: Callable[[BaseException], None] = lambda _err: None
+        self._stop = threading.Event()
+        self._current = None
+        self._thread: Optional[threading.Thread] = None
+        self._last_error: Optional[BaseException] = None
+        self._running = False
+
+    @property
+    def reader(self) -> str:
+        """The declared Reader's name — its durable identity."""
+        return self._reader
+
+    def start_at(self, start: ReaderStart) -> "FeedConsumer[K, V]":
+        """Where the Reader starts on first declaration (default
+        BEGINNING); ignored once the Reader exists — it resumes from
+        durable progress."""
+        self._start = start
+        return self
+
+    def capacity(self, capacity: int) -> "FeedConsumer[K, V]":
+        """Records fetched per page."""
+        self._capacity = capacity
+        return self
+
+    def on_record(
+        self, handler: Callable[[FeedMessage[K, V]], None]
+    ) -> "FeedConsumer[K, V]":
+        """The per-record handler — required for :meth:`run`. A thrown
+        exception leaves the page unacked so it redelivers; poison
+        pills are the app's job (route to a DLQ feed)."""
+        self._on_record = handler
+        return self
+
+    def on_error(
+        self, handler: Callable[[BaseException], None]
+    ) -> "FeedConsumer[K, V]":
+        """Error sink for visibility — plumbing failures and handler
+        exceptions alike. The loop continues regardless; stopping is
+        only via :meth:`close`."""
+        self._on_error = handler
+        return self
+
+    def backoff(
+        self, initial_s: float, max_s: float
+    ) -> "FeedConsumer[K, V]":
+        """Restart backoff bounds in seconds (default 0.25 -> 30)."""
+        self._initial_backoff = initial_s
+        self._max_backoff = max_s
+        return self
+
+    @property
+    def last_error(self) -> Optional[BaseException]:
+        """The last supervised failure (plumbing or handler)."""
+        return self._last_error
+
+    @property
+    def is_running(self) -> bool:
+        """True while the supervise loop is active."""
+        return self._running
+
+    def run(
+        self, handler: Optional[Callable[[FeedMessage[K, V]], None]] = None
+    ) -> None:
+        """Run the consumer on the calling thread until :meth:`close`.
+        Raises only for startup refusals — Kafka-style fail-fast."""
+        handler = handler or self._on_record
+        if handler is None:
+            raise ValueError("on_record handler is required")
+        self._stop.clear()
+        self._thread = threading.current_thread()
+        self._running = True
+        backoff = self._initial_backoff
+        try:
+            while not self._stop.is_set():
+                iter_error: List[Optional[BaseException]] = [None]
+
+                def deliver(records: List[FeedMessage[K, V]]) -> None:
+                    for record in records:
+                        try:
+                            handler(record)
+                        except Exception as error:
+                            self._last_error = error
+                            iter_error[0] = error
+                            raise
+
+                sub = self._feed._subscribe_decoded(
+                    self._reader, self._start, self._capacity,
+                    deliver, None)
+                self._current = sub
+                try:
+                    while sub.running and not self._stop.is_set():
+                        time.sleep(self._POLL_S)
+                finally:
+                    sub.close()
+                    self._current = None
+                if self._stop.is_set():
+                    break
+                failure = sub.failure
+                if isinstance(failure, Refused):
+                    raise failure        # refused = fix the request — fail fast
+                error = failure or iter_error[0]
+                if error is None:
+                    # Died without a wire error or handler exception —
+                    # e.g. local name validation. Supervising a silent
+                    # death loops forever; surface it instead.
+                    raise WhitewaterError(
+                        0, None,
+                        f"subscription '{self._reader}' terminated "
+                        "without an error to supervise")
+                if error is not None:
+                    try:
+                        self._on_error(error)
+                    except Exception:
+                        pass             # error sinks never break supervision
+                self._stop.wait(backoff)
+                backoff = min(backoff * 2, self._max_backoff)
+        finally:
+            self._running = False
+            current, self._current = self._current, None
+            if current is not None:
+                current.close()
+
+    def run_async(
+        self, handler: Optional[Callable[[FeedMessage[K, V]], None]] = None
+    ) -> threading.Thread:
+        """The same supervised consumer on its own non-daemon thread —
+        for several consumers or non-blocking startup."""
+        thread = threading.Thread(
+            target=self.run, args=(handler,),
+            name=f"whitewater-consumer-{self._reader}", daemon=False)
+        thread.start()
+        return thread
+
+    def close(self) -> None:
+        """Graceful stop: the in-flight page finishes and acks, the
+        session closes, ``run()``/iteration return. Safe from a
+        signal/atexit handler; joins the supervise thread so the
+        consumer is fully stopped when this returns (unless called
+        from inside a handler, where it only signals)."""
+        self._stop.set()
+        current = self._current
+        me = threading.current_thread()
+        if current is not None and current._thread is me:
+            return            # handler-initiated close: signal only — the
+                              # run loop's finally releases the session
+        if current is not None:
+            current.close()
+        thread = self._thread
+        if thread is not None and thread is not me:
+            thread.join(timeout=30)
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=30)
+
+    def __iter__(self):
+        """Iterate decoded records forever — supervised like
+        :meth:`run`. Breaking out (or a loop-body exception) closes the
+        consumer; a :class:`Refused` startup error propagates."""
+        messages: "queue.Queue" = queue.Queue()
+
+        def supervise() -> None:
+            try:
+                self.run(messages.put)
+            except BaseException as error:
+                self._last_error = error
+                messages.put(error)
+            finally:
+                messages.put(_SENTINEL)
+
+        thread = threading.Thread(
+            target=supervise,
+            name=f"whitewater-consumer-{self._reader}", daemon=False)
+        thread.start()
+        try:
+            while True:
+                item = messages.get()
+                if item is _SENTINEL:
+                    return
+                if isinstance(item, BaseException):
+                    raise item
+                yield item
+        finally:
+            self.close()

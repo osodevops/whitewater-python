@@ -17,6 +17,7 @@ from .client import (
 )
 from .feed import (
     Feed,
+    FeedConsumer,
     FeedEvent,
     FeedMessage,
     FeedPage,
@@ -81,6 +82,7 @@ __all__ = [
     "Feed",
     "FeedAppend",
     "FeedClient",
+    "FeedConsumer",
     "FeedEvent",
     "FeedMessage",
     "FeedPage",
