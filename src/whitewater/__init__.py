@@ -50,6 +50,7 @@ from .errors import (
     Unavailable,
     WhitewaterError,
 )
+from .testing import FakeRiverbed
 from .models import (
     AppendBatchResult,
     AppendResult,
@@ -84,6 +85,7 @@ __all__ = [
     "ControlExecution",
     "Cursor",
     "Extractor",
+    "FakeRiverbed",
     "Feed",
     "FeedAppend",
     "FeedClient",

@@ -309,6 +309,24 @@ pytest
 
 
 
+## Unit-test doubles
+
+`whitewater.testing.FakeRiverbed` serves the wire contract on loopback —
+appends dedupe by request id, unacked pages redeliver, stale epochs
+fence, and StateStores model named keys — so application tests exercise
+the real client without a Riverbed.
+
+```python
+from whitewater.testing import FakeRiverbed
+
+with FakeRiverbed() as fake:
+    client = fake.client()          # configured WhitewaterClient
+    # ...
+```
+
+See `tests/test_testing_double.py` and the
+[testing guide](../whitewater/docs/guides/testing-your-app.md).
+
 ## Conformance
 
 
