@@ -218,11 +218,13 @@ StoreValue = Union[None, bool, int, str, bytes]
 
 
 class Extractor:
-    """How a feed-sourced StateStore projects one committed source record
-    to a named key's typed lookup values — declared on
-    ``StateStore.add_key(..., extractor=)`` and applied by server-side
-    replay. Build with the class factories; manual stores leave it unset
-    and take values on each ``put`` instead."""
+    """How a committed record projects to a typed field value — the
+    ``IndexFieldSpec`` the wire carries. Declared on
+    ``StateStore.add_key(..., extractor=)`` for feed-sourced named keys
+    and on ``PipeOperation.enrich``/``window`` for the lookup/grouping
+    Key; applied by server-side replay and drive. Build with the class
+    factories; manual stores leave it unset and take values on each
+    ``put`` instead."""
 
     def __init__(self, body: Dict[str, Any]):
         self._body = body
@@ -235,14 +237,23 @@ class Extractor:
     @staticmethod
     def metadata(name: str) -> "Extractor":
         """A named record Metadata entry."""
+        if not name or not name.strip():
+            raise ValueError("metadata extractor name is required")
         return Extractor({"kind": "metadata", "name": name})
 
     @staticmethod
     def json(field: str) -> "Extractor":
         """A dotted JSON-path projection over the record payload."""
+        if not field or not field.strip():
+            raise ValueError("json extractor field is required")
         return Extractor(
             {"kind": "projection", "extractor": "json", "version": 1, "field": field}
         )
+
+    def to_wire(self) -> Dict[str, Any]:
+        """The ``IndexFieldSpec`` wire object, internally tagged on
+        ``kind``."""
+        return dict(self._body)
 
 
 @dataclass(frozen=True)

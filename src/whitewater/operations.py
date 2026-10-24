@@ -7,7 +7,10 @@ from __future__ import annotations
 import base64
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from enum import Enum
+from typing import Any, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
+
+from .models import Extractor
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .client import WhitewaterClient
@@ -116,6 +119,209 @@ class Pipe:
 
     def _lifecycle(self, command: str) -> None:
         self._client.commands([{"command": command, "name": self.name}])
+
+
+# ---- Pipe declaration ------------------------------------------------------
+#
+# ``define_pipe`` declares the managed processing step a Pipe applies to
+# every record its Subscription delivers — Forward copies, Enrich
+# point-looks-up a StateStore row, Window accumulates fixed panes. The
+# types below build the tagged ``operation`` object verbatim; the server
+# owns the drive, so a declaration carries names only — never partitions
+# or Nodes.
+
+
+class WindowTime(str, Enum):
+    """Which record clock a ``window`` Pipe buckets into panes."""
+
+    #: ``event_time_ns`` — the application-stamped occurrence clock (default).
+    EVENT = "event"
+    #: ``ingest_time_ns`` — the durable-arrival clock.
+    INGEST = "ingest"
+
+
+class EnrichFreshness(str, Enum):
+    """How fresh an ``enrich`` Pipe lookup row must be before it is
+    journaled."""
+
+    #: Serve the replica's applied state (default; the resolution is
+    #: journaled either way, so replayed outputs are byte-identical).
+    LATEST = "latest"
+    #: Require applied to cover committed at read entry; lag yields a
+    #: retryable drive failure.
+    STRICT = "strict"
+
+
+class EnrichMiss(str, Enum):
+    """What an ``enrich`` Pipe lookup miss does to the output record."""
+
+    #: Forward the record with ``enrich.matched = false`` (default).
+    FORWARD = "forward"
+    #: Consume without emitting; the input frontier still commits.
+    DROP = "drop"
+    #: Route the miss to the declared quarantine Feed.
+    QUARANTINE = "quarantine"
+
+
+def _require_extractor(value: Any, where: str) -> Extractor:
+    if not isinstance(value, Extractor):
+        raise TypeError(
+            f"{where} requires an Extractor — "
+            "Extractor.record_key()/metadata()/json()"
+        )
+    return value
+
+
+@dataclass(frozen=True)
+class WindowAggregation:
+    """What a ``window`` Pipe adds to each pane's accumulator: ``count``
+    records, ``sum`` an extracted integer, or ``average`` tracking
+    count+sum (readers divide). Build with the class factories."""
+
+    aggregation: str
+    value: Optional[Extractor] = None
+
+    @staticmethod
+    def count() -> "WindowAggregation":
+        """Count records per (group Key, pane)."""
+        return WindowAggregation("count")
+
+    @staticmethod
+    def sum(value: Extractor) -> "WindowAggregation":
+        """Sum one extracted integer value per pane."""
+        return WindowAggregation("sum", _require_extractor(value, "sum value"))
+
+    @staticmethod
+    def average(value: Extractor) -> "WindowAggregation":
+        """Track count and integer sum per pane; readers divide."""
+        return WindowAggregation(
+            "average", _require_extractor(value, "average value"))
+
+    def to_wire(self) -> Dict[str, Any]:
+        """The wire form: ``{"aggregation": "sum", "value": {...}}``."""
+        node: Dict[str, Any] = {"aggregation": self.aggregation}
+        if self.value is not None:
+            node["value"] = self.value.to_wire()
+        return node
+
+
+@dataclass(frozen=True)
+class PipeOperation:
+    """The processing step a Pipe applies to each delivered input record.
+    Build with :meth:`forward`, :meth:`enrich`, or :meth:`window`; the
+    wire form is internally tagged on ``operation``."""
+
+    operation: str
+    key: Optional[Extractor] = None
+    freshness: Union[EnrichFreshness, str] = EnrichFreshness.LATEST
+    named: Optional[str] = None
+    on_miss: Union[EnrichMiss, str] = EnrichMiss.FORWARD
+    window_ns: Optional[int] = None
+    aggregation: Optional[WindowAggregation] = None
+    time: Union[WindowTime, str] = WindowTime.EVENT
+    max_late_ns: Optional[int] = None
+    watermark_ns: Optional[int] = None
+    grace_ns: Optional[int] = None
+    expire_ns: Optional[int] = None
+    key_limit: Optional[int] = None
+    byte_limit: Optional[int] = None
+
+    @staticmethod
+    def forward() -> "PipeOperation":
+        """Copy each delivered record to the output Feed unchanged."""
+        return PipeOperation("forward")
+
+    @staticmethod
+    def enrich(
+        key: Extractor,
+        freshness: Union[EnrichFreshness, str] = EnrichFreshness.LATEST,
+        named: Optional[str] = None,
+        on_miss: Union[EnrichMiss, str] = EnrichMiss.FORWARD,
+    ) -> "PipeOperation":
+        """Point-lookup enrichment against the output StateStore: resolve
+        one row by the projected ``key`` and copy its payload into output
+        Metadata (``enrich.payload``, ``enrich.matched``). The lookup
+        resolution rides inside the effect journal, so replayed outputs
+        are byte-identical."""
+        return PipeOperation(
+            "enrich",
+            key=_require_extractor(key, "enrich key"),
+            freshness=EnrichFreshness(freshness),
+            named=named,
+            on_miss=EnrichMiss(on_miss),
+        )
+
+    @staticmethod
+    def window(
+        window_ns: int,
+        key: Extractor,
+        aggregation: WindowAggregation,
+        *,
+        time: Union[WindowTime, str] = WindowTime.EVENT,
+        max_late_ns: Optional[int] = None,
+        watermark_ns: Optional[int] = None,
+        grace_ns: Optional[int] = None,
+        expire_ns: Optional[int] = None,
+        key_limit: Optional[int] = None,
+        byte_limit: Optional[int] = None,
+    ) -> "PipeOperation":
+        """Accumulate each delivered record into fixed ``window_ns``-wide
+        panes of a managed StateStore view. Panes are immutable once
+        written; ``max_late_ns`` bounds late-event policy (later arrivals
+        quarantine into a countable ``late`` row) and ``expire_ns`` bounds
+        pane retention once the pane provably closes."""
+        if isinstance(window_ns, bool) or not isinstance(window_ns, int):
+            raise TypeError("window_ns must be an int of nanoseconds")
+        if window_ns <= 0:
+            raise ValueError("window_ns must be positive")
+        if not isinstance(aggregation, WindowAggregation):
+            raise TypeError(
+                "window aggregation is required — "
+                "WindowAggregation.count()/sum()/average()"
+            )
+        return PipeOperation(
+            "window",
+            key=_require_extractor(key, "window key"),
+            window_ns=window_ns,
+            aggregation=aggregation,
+            time=WindowTime(time),
+            max_late_ns=max_late_ns,
+            watermark_ns=watermark_ns,
+            grace_ns=grace_ns,
+            expire_ns=expire_ns,
+            key_limit=key_limit,
+            byte_limit=byte_limit,
+        )
+
+    def to_wire(self) -> Dict[str, Any]:
+        """The tagged ``operation`` object ``define_pipe`` carries."""
+        node: Dict[str, Any] = {"operation": self.operation}
+        if self.key is not None:
+            node["key"] = self.key.to_wire()
+        if self.window_ns is not None:
+            node["window_ns"] = self.window_ns
+        if self.aggregation is not None:
+            node["aggregation"] = self.aggregation.to_wire()
+        if self.operation == "window":
+            node["time"] = WindowTime(self.time).value
+        if self.max_late_ns is not None:
+            node["max_late_ns"] = self.max_late_ns
+        if self.watermark_ns is not None:
+            node["watermark_ns"] = self.watermark_ns
+        if self.grace_ns is not None:
+            node["grace_ns"] = self.grace_ns
+        if self.expire_ns is not None:
+            node["expire_ns"] = self.expire_ns
+        if self.key_limit is not None:
+            node["key_limit"] = self.key_limit
+        if self.byte_limit is not None:
+            node["byte_limit"] = self.byte_limit
+        if self.operation == "enrich":
+            node["freshness"] = EnrichFreshness(self.freshness).value
+            if self.named is not None:
+                node["named"] = self.named
+            node["on_miss"] = EnrichMiss(self.on_miss).value
+        return node
 
 
 # ---------------------------------------------------------------------------

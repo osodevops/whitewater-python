@@ -28,6 +28,8 @@ from .feed import (
 from .operations import (
     DemandReport,
     DemandRow,
+    EnrichFreshness,
+    EnrichMiss,
     HotKey,
     IndexBound,
     IndexPage,
@@ -35,6 +37,9 @@ from .operations import (
     IndexRow,
     Pipe,
     PipeInfo,
+    PipeOperation,
+    WindowAggregation,
+    WindowTime,
 )
 from .errors import (
     AmbiguousResult,
@@ -101,6 +106,11 @@ __all__ = [
     "Record",
     "PipeInfo",
     "Pipe",
+    "PipeOperation",
+    "WindowAggregation",
+    "WindowTime",
+    "EnrichFreshness",
+    "EnrichMiss",
     "IndexRow",
     "IndexPredicate",
     "IndexPage",

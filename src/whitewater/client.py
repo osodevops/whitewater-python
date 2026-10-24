@@ -840,6 +840,84 @@ class WhitewaterClient:
 
 
 
+    # ---- Pipe declaration ----------------------------------------------
+    # Typed ``define_pipe`` builders over :meth:`commands`. Names validate
+    # locally, so a bad value fails before reaching the Control Plane.
+
+    def define_forward_pipe(
+        self, name: str, subscription: str, output_feed: str
+    ) -> ControlExecution:
+        """``DEFINE PIPE`` — the copy Pipe: every record ``subscription``
+        delivers is appended to ``output_feed`` unchanged."""
+        from .operations import PipeOperation
+        return self.commands([
+            {
+                "command": "define_pipe",
+                "name": _dotted(name),
+                "subscription": _resource(subscription),
+                "output_feed": _dotted(output_feed),
+                "operation": PipeOperation.forward().to_wire(),
+            }
+        ])
+
+    def define_enrich_pipe(
+        self,
+        name: str,
+        subscription: str,
+        output_feed: str,
+        store: str,
+        operation: "PipeOperation",
+        quarantine_feed: Optional[str] = None,
+    ) -> ControlExecution:
+        """``DEFINE PIPE ... ENRICH FROM <store>`` — point-lookup
+        enrichment resolving against ``store`` into ``output_feed``.
+        ``quarantine_feed`` names the miss-quarantine target when the
+        operation's miss disposition is ``EnrichMiss.QUARANTINE``."""
+        from .operations import PipeOperation
+        if not isinstance(operation, PipeOperation):
+            raise TypeError("enrich pipes take PipeOperation.enrich(...)")
+        if operation.operation != "enrich":
+            raise ValueError("enrich pipes take PipeOperation.enrich(...)")
+        command: Dict[str, Any] = {
+            "command": "define_pipe",
+            "name": _dotted(name),
+            "subscription": _resource(subscription),
+            "output_feed": _dotted(output_feed),
+            "output_store": _dotted(store),
+        }
+        if quarantine_feed is not None:
+            command["quarantine_feed"] = _dotted(quarantine_feed)
+        command["operation"] = operation.to_wire()
+        return self.commands([command])
+
+    def define_window_pipe(
+        self,
+        name: str,
+        subscription: str,
+        output_store: str,
+        operation: "PipeOperation",
+        emit_feed: Optional[str] = None,
+    ) -> ControlExecution:
+        """``DEFINE PIPE ... TO STATESTORE <store>`` — rolling-window
+        aggregation accumulating into ``output_store``. ``emit_feed``
+        optionally emits closed panes and requires the operation declare
+        ``max_late_ns``."""
+        from .operations import PipeOperation
+        if not isinstance(operation, PipeOperation):
+            raise TypeError("window pipes take PipeOperation.window(...)")
+        if operation.operation != "window":
+            raise ValueError("window pipes take PipeOperation.window(...)")
+        command: Dict[str, Any] = {
+            "command": "define_pipe",
+            "name": _dotted(name),
+            "subscription": _resource(subscription),
+            "output_store": _dotted(output_store),
+        }
+        if emit_feed is not None:
+            command["emit_feed"] = _dotted(emit_feed)
+        command["operation"] = operation.to_wire()
+        return self.commands([command])
+
     # ---- Pipe lifecycle ------------------------------------------------
 
     def pipe(self, name: str) -> "Pipe":
@@ -1264,7 +1342,8 @@ class StateStoresClient:
                 {
                     "name": key.name,
                     "unique": key.unique,
-                    **({"extractor": key.extractor._body} if key.extractor else {}),
+                    **({"extractor": key.extractor.to_wire()}
+                       if key.extractor else {}),
                 }
                 for key in spec.named_keys
             ],
