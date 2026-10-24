@@ -1,0 +1,94 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Inject release version into pyproject.toml
+        run: |
+          export VERSION="${GITHUB_REF_NAME#v}"
+          echo "Release version: ${VERSION}"
+          python - <<'PY'
+          import os
+          import pathlib
+          import re
+          import sys
+
+          version = os.environ["VERSION"]
+
+          # PEP 440 sanity check — prefer `packaging` if importable, else regex.
+          try:
+              from packaging.version import Version
+              Version(version)
+          except ImportError:
+              pep440 = re.compile(
+                  r"^(?:\d+!)?\d+(?:\.\d+)*"
+                  r"(?:(?:a|b|rc)\d+)?"
+                  r"(?:\.post\d+)?"
+                  r"(?:\.dev\d+)?"
+                  r"(?:\+[a-zA-Z0-9]+(?:[.\-_][a-zA-Z0-9]+)*)?$"
+              )
+              if not pep440.match(version):
+                  sys.exit(f"::error::{version!r} is not a PEP 440 version")
+          except Exception as exc:
+              sys.exit(f"::error::{version!r} is not a PEP 440 version: {exc}")
+
+          # Rewrite `version = "..."` in the [project] table ONLY — a table
+          # boundary (any other `[section]` header) ends the match scope, so
+          # [build-system] and friends are never touched. newline="" keeps
+          # the file's original line endings byte-for-byte.
+          path = pathlib.Path("pyproject.toml")
+          with path.open("r", newline="") as fh:
+              lines = fh.read().splitlines(keepends=True)
+          in_project = False
+          changed = 0
+          for i, line in enumerate(lines):
+              stripped = line.strip()
+              if stripped.startswith("["):
+                  in_project = stripped == "[project]"
+                  continue
+              if in_project and stripped.startswith("version"):
+                  new_line = re.sub(
+                      r'version\s*=\s*"[^"]*"',
+                      lambda m: f'version = "{version}"',
+                      line,
+                  )
+                  if new_line != line:
+                      lines[i] = new_line
+                      changed += 1
+          if changed != 1:
+              sys.exit(
+                  f"::error::expected exactly 1 version line to change, got {changed}"
+              )
+          with path.open("w", newline="") as fh:
+              fh.write("".join(lines))
+          print(f"Injected version={version} into [project] ({changed} line changed)")
+          PY
+          echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
+          grep -n 'version' pyproject.toml
+      - name: Build distributions
+        run: |
+          pip install build
+          python -m build
+          ls -la dist/
+      - name: Generate checksums
+        run: |
+          cd dist && sha256sum * > checksums.txt && cd -
+          cat dist/checksums.txt
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "${{ github.ref_name }}" dist/* --generate-notes --title "whitewater-client ${{ env.VERSION }}"
