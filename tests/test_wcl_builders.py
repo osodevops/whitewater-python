@@ -97,6 +97,11 @@ def test_readers_and_subscriptions(client):
         script_of(captured)
         == "CREATE SUBSCRIPTION team FROM orders.events START AT NOW"
     )
+    c.create_subscription("orders.sub", "orders.events", ReaderStart.beginning())
+    assert (
+        script_of(captured)
+        == "CREATE SUBSCRIPTION orders.sub FROM orders.events START AT BEGINNING"
+    )
 
 
 def test_sessions_and_seek(client):
@@ -137,6 +142,8 @@ def test_invalid_names_fail_locally(client):
         c.create_writer("bad;name", "orders.events")
     with pytest.raises(ValueError):
         c.create_reader("a'b", "orders.events")
+    with pytest.raises(ValueError):
+        c.create_subscription("orders-sub", "orders.events")
     with pytest.raises(ValueError):
         c.rename_domain("orders", "INJECTION; DROP")
     assert captured["path"] == ""

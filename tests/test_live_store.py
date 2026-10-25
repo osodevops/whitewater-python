@@ -66,12 +66,12 @@ def test_named_key_store_lifecycle_live():
     assert found.freshness.behind is False
 
     team = store.get_by("department", "eng", strict=True)
-    assert sorted(row.key for row in team.rows) == [b"user-1", b"user-2"]
+    assert sorted(row.key for row in team.rows) == ["user-1", "user-2"]
 
     solo = store.get_by("passport", "P222")
-    assert [row.key for row in solo.rows] == [b"user-2"]
+    assert [row.key for row in solo.rows] == ["user-2"]
 
-    assert sorted(row.key for row in store.iterate()) == [b"user-1", b"user-2"]
+    assert sorted(row.key for row in store.iterate()) == ["user-1", "user-2"]
 
     store.clear()
     assert store.get(b"user-1") is None

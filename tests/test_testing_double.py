@@ -274,12 +274,12 @@ def test_reader_start_variants(riverbed, client):
     writer.append("k3", b"third")
 
     client.create_reader(
-        "from-cursor", "orders.events", start=ReaderStart.cursor(second.cursor)
+        "from.cursor", "orders.events", start=ReaderStart.cursor(second.cursor)
     )
-    session = client.reader("from-cursor").open(capacity=8)
-    page = client.reader("from-cursor").fetch(session)
+    session = client.reader("from.cursor").open(capacity=8)
+    page = client.reader("from.cursor").fetch(session)
     assert [r.payload for r in page.records] == [b"third"]
-    client.reader("from-cursor").close(session)
+    client.reader("from.cursor").close(session)
 
 
 def test_unknown_path_and_errors_decode(riverbed, client):

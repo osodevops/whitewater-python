@@ -68,8 +68,8 @@ Raw script — several statements commit as one request (one
 client.wcl("""
     CREATE DOMAIN shop;
     CREATE FEED shop.orders;
-    CREATE WRITER orders-writer TO shop.orders;
-    OPEN WRITER SESSION orders-writer;
+    CREATE WRITER orders.writer TO shop.orders;
+    OPEN WRITER SESSION orders.writer;
     CREATE READER audit FROM shop.orders START AT BEGINNING;
     SHOW FEEDS;
 """)
@@ -81,8 +81,8 @@ statement and calls `wcl` internally:
 ```python
 client.create_domain("shop")                       # CREATE DOMAIN shop;
 client.create_feed("shop.orders")                  # CREATE FEED shop.orders;
-client.create_writer("orders-writer", "shop.orders")
-client.open_writer_session("orders-writer")        # epoch comes back in .data
+client.create_writer("orders.writer", "shop.orders")
+client.open_writer_session("orders.writer")        # epoch comes back in .data
 client.create_reader("audit", "shop.orders", ReaderStart.beginning())
 client.list_feeds()                                # SHOW FEEDS;
 client.seek_reader("audit", ReaderStart.now())     # SEEK READER ... TO NOW;

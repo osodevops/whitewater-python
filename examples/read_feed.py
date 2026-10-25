@@ -47,7 +47,7 @@ orders = client.feed("demo.orders", value_type=Order)
 # Declares the Reader if missing (durable Control Plane state), opens
 # the session, and owns the fence. Another client opening the same
 # Reader supersedes this session (stale_epoch on the next fetch).
-with orders.reader("demo-reader", capacity=64) as reader:
+with orders.reader("demo.reader", capacity=64) as reader:
     while True:
         # fetch() returns immediately with whatever is committed — a
         # Reader is not a long-poll. For "sit and wait" behavior, use

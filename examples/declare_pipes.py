@@ -13,7 +13,7 @@ and replay, so there is no consumer code to run:
 
 Declaration is a control command, not a process::
 
-    client.define_forward_pipe("ops.relay", "relay-sub", "ops.archive")
+    client.define_forward_pipe("ops.relay", "relay.sub", "ops.archive")
 
 then the Pipe lifecycle is operational::
 
@@ -60,22 +60,27 @@ client.create_feed("ops.enriched")    # enrich output
 client.create_feed("ops.misses")      # enrich quarantine target
 client.create_feed("ops.panes")       # window emit feed
 
-# ops.profiles (enrich lookup) and ops.minute.totals (window panes) are
-# declared StateStores — see examples/enrich_users.py for store setup.
-client.create_subscription("relay-sub", "ops.events")
-client.create_subscription("enrich-sub", "ops.events")
-client.create_subscription("window-sub", "ops.events")
+# The enrich lookup store (manual) and the window pane view — a window
+# Pipe's output store must declare non-unique 'key' and 'pane' named
+# keys so pane rows stay enumerable without composite row keys.
+client.state_stores.define(client.state_store("ops.profiles"))
+client.state_stores.define(
+    client.state_store("ops.minute.totals").add_key("key").add_key("pane")
+)
+client.create_subscription("relay.sub", "ops.events")
+client.create_subscription("enrich.sub", "ops.events")
+client.create_subscription("window.sub", "ops.events")
 
 # ---- declarations --------------------------------------------------------
 
 # Forward: archive every delivered record unchanged.
-client.define_forward_pipe("ops.relay", "relay-sub", "ops.archive")
+client.define_forward_pipe("ops.relay", "relay.sub", "ops.archive")
 
 # Enrich: look up ops.profiles by the record's JSON "user_id"; misses go
 # to the quarantine feed instead of emitting unmatched output.
 client.define_enrich_pipe(
     "ops.enrich",
-    "enrich-sub",
+    "enrich.sub",
     "ops.enriched",
     "ops.profiles",
     PipeOperation.enrich(
@@ -89,7 +94,7 @@ client.define_enrich_pipe(
 # ops.minute.totals; panes close 5s late-bound and emit to ops.panes.
 client.define_window_pipe(
     "ops.rollups",
-    "window-sub",
+    "window.sub",
     "ops.minute.totals",
     PipeOperation.window(
         60_000_000_000,

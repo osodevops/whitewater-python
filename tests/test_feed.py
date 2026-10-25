@@ -228,13 +228,13 @@ def test_view_rebinds_codecs_without_a_wire_call(stub, client):
 
 
 def test_writer_declares_opens_and_serializes(stub, client):
-    writer = client.feed("orders.events", value_type=Order).writer("orders-ingest")
+    writer = client.feed("orders.events", value_type=Order).writer("orders.ingest")
     assert any("CREATE WRITER" in b for b in stub["bodies"]), "writer was declared"
     assert any("open_writer_session" in b for b in stub["bodies"])
 
     writer.append("order-1", Order("order-1", 99))
     sent = last_body(stub, "/v1/writers/append")
-    assert sent["writer"] == "orders-ingest"
+    assert sent["writer"] == "orders.ingest"
     assert sent["session_epoch"] == 42
     assert base64.b64decode(sent["key_base64"]) == b"order-1"
     wire = base64.b64decode(sent["payload_base64"]).decode()
@@ -243,12 +243,12 @@ def test_writer_declares_opens_and_serializes(stub, client):
 
 def test_writer_tolerates_already_declared(stub, client):
     stub["refuse_creates"] = True
-    writer = client.feed("orders.events", value_type=Order).writer("orders-ingest")
+    writer = client.feed("orders.events", value_type=Order).writer("orders.ingest")
     assert writer.session_epoch == 42
 
 
 def test_append_event_carries_identity_time_and_metadata(stub, client):
-    writer = client.feed("orders.events", value_type=Order).writer("orders-ingest")
+    writer = client.feed("orders.events", value_type=Order).writer("orders.ingest")
     rid = uuid.UUID("019a0000-0000-7000-8000-0000000000cc")
     writer.append_event(
         FeedEvent("order-7", Order("order-7", 7))
@@ -263,7 +263,7 @@ def test_append_event_carries_identity_time_and_metadata(stub, client):
 
 
 def test_append_all_serializes_every_event(stub, client):
-    writer = client.feed("orders.events", value_type=Order).writer("orders-ingest")
+    writer = client.feed("orders.events", value_type=Order).writer("orders.ingest")
     result = writer.append_all([
         FeedEvent("o1", Order("o1", 1)),
         FeedEvent("o2", Order("o2", 2)),
@@ -288,7 +288,7 @@ def test_ad_hoc_append_serializes_through_facade(stub, client):
 
 
 def test_reader_declares_opens_and_decodes(stub, client):
-    with client.feed("orders.events", value_type=Order).reader("orders-audit", 64) as reader:
+    with client.feed("orders.events", value_type=Order).reader("orders.audit", 64) as reader:
         assert any("CREATE READER" in b for b in stub["bodies"]), "reader declared"
         page = reader.fetch()
         assert len(page.records) == 1
@@ -304,7 +304,7 @@ def test_reader_declares_opens_and_decodes(stub, client):
 
 def test_reader_tolerates_already_declared(stub, client):
     stub["refuse_creates"] = True
-    with client.feed("orders.events", value_type=Order).reader("orders-audit", 64) as reader:
+    with client.feed("orders.events", value_type=Order).reader("orders.audit", 64) as reader:
         assert reader.session_epoch == 7
 
 
@@ -317,7 +317,7 @@ def test_subscribe_delivers_decoded_batches_and_acks(stub, client):
         delivered.set()
 
     feed = client.feed("orders.events", value_type=Order)
-    with feed.subscribe("orders-sub", ReaderStart.beginning(), on_records):
+    with feed.subscribe("orders.sub", ReaderStart.beginning(), on_records):
         assert delivered.wait(5), "subscription delivered"
         assert seen["msg"].key == "order-1"
         assert seen["msg"].value.total == 10

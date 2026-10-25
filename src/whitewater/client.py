@@ -46,7 +46,6 @@ from .models import (
 UuidLike = Union[uuid.UUID, str]
 
 _DOTTED_RE = re.compile(r"^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)*$")
-_RESOURCE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
 
 
 def _dotted(name: str) -> str:
@@ -57,10 +56,9 @@ def _dotted(name: str) -> str:
 
 
 def _resource(name: str) -> str:
-    """Single-segment resource names (writers, readers, subscriptions, roles)."""
-    if not name or not _RESOURCE_RE.match(name):
-        raise ValueError(f"invalid resource name: {name!r}")
-    return name
+    """Resource names (writers, readers, subscriptions, roles) share the
+    same dotted grammar the server validates for every resource kind."""
+    return _dotted(name)
 
 
 class WriterSessionClient:
