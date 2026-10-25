@@ -173,7 +173,7 @@ def test_subscribe_opens_delivers_acks_and_closes(stub):
     delivered = threading.Event()
     batches = []
     sub = client.subscribe(
-        "hr-view",
+        "hr.view",
         "hr.employees",
         ReaderStart.beginning(),
         lambda records: (batches.append(records), delivered.set()),
@@ -189,7 +189,7 @@ def test_subscribe_opens_delivers_acks_and_closes(stub):
     assert len(batches[0]) == 1
     wcl_calls = bodies(state, "/v1/admin/wcl")
     assert len(wcl_calls) == 1, "reader auto-provisioned once"
-    assert "CREATE READER hr-view FROM hr.employees" in wcl_calls[0]["script"]
+    assert "CREATE READER hr.view FROM hr.employees" in wcl_calls[0]["script"]
     acks = bodies(state, "/v1/readers/ack")
     assert acks[0]["cursor"] == "d1"
     assert any(p == "/v1/readers/close" for p, _ in state["calls"])
@@ -199,7 +199,7 @@ def test_subscribe_opens_delivers_acks_and_closes(stub):
 def test_subscribe_reuses_existing_reader_and_reports_stale_session(stub):
     state, url, _lock = stub
     state["wcl_status"] = 400
-    state["wcl_body"] = {"error": "Reader hr-view already exists"}
+    state["wcl_body"] = {"error": "Reader hr.view already exists"}
     state["open_status"] = 400
     state["open_body"] = {"error": "stale session epoch", "code": "stale_epoch"}
     client = WhitewaterClient(api_key="test-key", endpoints=[url])
@@ -207,7 +207,7 @@ def test_subscribe_reuses_existing_reader_and_reports_stale_session(stub):
     errors = []
     failed = threading.Event()
     sub = client.subscribe(
-        "hr-view",
+        "hr.view",
         "hr.employees",
         ReaderStart.now(),
         lambda records: None,

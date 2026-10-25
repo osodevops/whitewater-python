@@ -244,12 +244,12 @@ def test_window_operation_validates_locally(client, stub):
 
 def test_define_forward_pipe_emits_the_copy_pipe(client, stub):
     state, _url = stub
-    client.define_forward_pipe("ops.relay", "relay-sub", "ops.archive")
+    client.define_forward_pipe("ops.relay", "relay.sub", "ops.archive")
     assert commands(state) == [
         {
             "command": "define_pipe",
             "name": "ops.relay",
-            "subscription": "relay-sub",
+            "subscription": "relay.sub",
             "output_feed": "ops.archive",
             "operation": {"operation": "forward"},
         }
@@ -260,7 +260,7 @@ def test_define_enrich_pipe_emits_feed_store_and_operation(client, stub):
     state, _url = stub
     client.define_enrich_pipe(
         "ops.enrich",
-        "enrich-sub",
+        "enrich.sub",
         "ops.enriched",
         "ops.profiles",
         PipeOperation.enrich(
@@ -271,7 +271,7 @@ def test_define_enrich_pipe_emits_feed_store_and_operation(client, stub):
         {
             "command": "define_pipe",
             "name": "ops.enrich",
-            "subscription": "enrich-sub",
+            "subscription": "enrich.sub",
             "output_feed": "ops.enriched",
             "output_store": "ops.profiles",
             "quarantine_feed": "ops.misses",
@@ -289,7 +289,7 @@ def test_define_enrich_pipe_emits_feed_store_and_operation(client, stub):
 def test_define_enrich_pipe_omits_absent_quarantine(client, stub):
     state, _url = stub
     client.define_enrich_pipe(
-        "ops.enrich", "enrich-sub", "ops.enriched", "ops.profiles",
+        "ops.enrich", "enrich.sub", "ops.enriched", "ops.profiles",
         PipeOperation.enrich(Extractor.record_key()),
     )
     command = commands(state)[0]
@@ -319,7 +319,7 @@ def test_define_window_pipe_emits_store_and_operation(client, stub):
     state, _url = stub
     client.define_window_pipe(
         "ops.rollups",
-        "window-sub",
+        "window.sub",
         "ops.minute.totals",
         PipeOperation.window(
             60_000_000_000,
@@ -333,7 +333,7 @@ def test_define_window_pipe_emits_store_and_operation(client, stub):
         {
             "command": "define_pipe",
             "name": "ops.rollups",
-            "subscription": "window-sub",
+            "subscription": "window.sub",
             "output_store": "ops.minute.totals",
             "emit_feed": "ops.panes",
             "operation": {
@@ -355,7 +355,7 @@ def test_define_window_pipe_emits_store_and_operation(client, stub):
 def test_define_window_pipe_omits_absent_emit_feed(client, stub):
     state, _url = stub
     client.define_window_pipe(
-        "ops.rollups", "window-sub", "ops.minute.totals",
+        "ops.rollups", "window.sub", "ops.minute.totals",
         PipeOperation.window(60, Extractor.record_key(),
                              WindowAggregation.count()))
     command = commands(state)[0]
