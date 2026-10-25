@@ -6,6 +6,7 @@ locally before any HTTP call.
 
 import json
 import threading
+from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
@@ -169,7 +170,7 @@ def test_enrich_operation_requires_a_key_extractor():
 
 def test_window_operation_wire_shape_minimal():
     operation = PipeOperation.window(
-        60_000_000_000,
+        timedelta(minutes=1),
         Extractor.record_key(),
         WindowAggregation.count(),
     )
@@ -184,14 +185,12 @@ def test_window_operation_wire_shape_minimal():
 
 def test_window_operation_wire_shape_with_every_bound():
     operation = PipeOperation.window(
-        5_000_000_000,
+        timedelta(seconds=5),
         Extractor.json("tenant"),
         WindowAggregation.sum(Extractor.json("amount")),
         time=WindowTime.INGEST,
-        max_late_ns=1_000_000_000,
-        watermark_ns=2_000_000,
-        grace_ns=3_000_000,
-        expire_ns=4_000_000_000,
+        max_late=timedelta(seconds=1),
+        expire=timedelta(seconds=4),
         key_limit=1000,
         byte_limit=1 << 20,
     )
@@ -207,22 +206,44 @@ def test_window_operation_wire_shape_with_every_bound():
         },
         "time": "ingest",
         "max_late_ns": 1_000_000_000,
-        "watermark_ns": 2_000_000,
-        "grace_ns": 3_000_000,
         "expire_ns": 4_000_000_000,
         "key_limit": 1000,
         "byte_limit": 1 << 20,
     }
 
 
+def test_window_operation_wire_shape_watermark_and_grace():
+    operation = PipeOperation.window(
+        timedelta(minutes=1),
+        Extractor.record_key(),
+        WindowAggregation.count(),
+        time=WindowTime.EVENT,
+        watermark=timedelta(milliseconds=2),
+        grace=timedelta(milliseconds=3),
+    )
+    assert operation.to_wire() == {
+        "operation": "window",
+        "key": {"kind": "key"},
+        "window_ns": 60_000_000_000,
+        "aggregation": {"aggregation": "count"},
+        "time": "event",
+        "watermark_ns": 2_000_000,
+        "grace_ns": 3_000_000,
+    }
+
+
 def test_window_operation_validates_locally(client, stub):
     state, _url = stub
     with pytest.raises(ValueError):
-        PipeOperation.window(0, Extractor.record_key(),
+        PipeOperation.window(timedelta(0), Extractor.record_key(),
                              WindowAggregation.count())
     with pytest.raises(ValueError):
-        PipeOperation.window(-1, Extractor.record_key(),
+        PipeOperation.window(timedelta(seconds=-1), Extractor.record_key(),
                              WindowAggregation.count())
+    with pytest.raises(ValueError):
+        PipeOperation.window(timedelta(minutes=1), Extractor.record_key(),
+                             WindowAggregation.count(),
+                             max_late=timedelta(0))
     with pytest.raises(TypeError):
         PipeOperation.window(1.5, Extractor.record_key(),
                              WindowAggregation.count())
@@ -230,13 +251,43 @@ def test_window_operation_validates_locally(client, stub):
         PipeOperation.window(True, Extractor.record_key(),
                              WindowAggregation.count())
     with pytest.raises(TypeError):
-        PipeOperation.window(60, None, WindowAggregation.count())
-    with pytest.raises(TypeError):
-        PipeOperation.window(60, Extractor.record_key(), None)
-    with pytest.raises(ValueError):
         PipeOperation.window(60, Extractor.record_key(),
+                             WindowAggregation.count())
+    with pytest.raises(TypeError):
+        PipeOperation.window(timedelta(seconds=60), None,
+                             WindowAggregation.count())
+    with pytest.raises(TypeError):
+        PipeOperation.window(timedelta(seconds=60), Extractor.record_key(),
+                             None)
+    with pytest.raises(TypeError):
+        PipeOperation.window(timedelta(seconds=60), Extractor.record_key(),
+                             WindowAggregation.count(), watermark=60)
+    with pytest.raises(ValueError):
+        PipeOperation.window(timedelta(seconds=60), Extractor.record_key(),
                              WindowAggregation.count(), time="crayon")
     assert state["calls"] == []
+
+
+def test_window_operation_validates_lateness_models():
+    # MAX_LATE and WATERMARK are alternative lateness models.
+    with pytest.raises(ValueError):
+        PipeOperation.window(
+            timedelta(minutes=1), Extractor.record_key(),
+            WindowAggregation.count(), time=WindowTime.EVENT,
+            max_late=timedelta(seconds=10),
+            watermark=timedelta(seconds=5))
+    # WATERMARK follows the event clock only.
+    with pytest.raises(ValueError):
+        PipeOperation.window(
+            timedelta(minutes=1), Extractor.record_key(),
+            WindowAggregation.count(), time=WindowTime.INGEST,
+            watermark=timedelta(seconds=5))
+    # GRACE requires WATERMARK — revision bounds ride the horizon.
+    with pytest.raises(ValueError):
+        PipeOperation.window(
+            timedelta(minutes=1), Extractor.record_key(),
+            WindowAggregation.count(), time=WindowTime.EVENT,
+            grace=timedelta(seconds=30))
 
 
 # ---- define_pipe commands ------------------------------------------------------
@@ -302,7 +353,8 @@ def test_define_enrich_pipe_refuses_other_operations(client, stub):
     with pytest.raises(ValueError):
         client.define_enrich_pipe(
             "ops.enrich", "sub", "ops.out", "ops.profiles",
-            PipeOperation.window(60, Extractor.record_key(),
+            PipeOperation.window(timedelta(seconds=60),
+                                 Extractor.record_key(),
                                  WindowAggregation.count()))
     with pytest.raises(ValueError):
         client.define_enrich_pipe(
@@ -322,10 +374,10 @@ def test_define_window_pipe_emits_store_and_operation(client, stub):
         "window.sub",
         "ops.minute.totals",
         PipeOperation.window(
-            60_000_000_000,
+            timedelta(minutes=1),
             Extractor.record_key(),
             WindowAggregation.sum(Extractor.json("amount")),
-            max_late_ns=5_000_000_000,
+            max_late=timedelta(seconds=5),
         ),
         emit_feed="ops.panes",
     )
@@ -356,7 +408,8 @@ def test_define_window_pipe_omits_absent_emit_feed(client, stub):
     state, _url = stub
     client.define_window_pipe(
         "ops.rollups", "window.sub", "ops.minute.totals",
-        PipeOperation.window(60, Extractor.record_key(),
+        PipeOperation.window(timedelta(seconds=60),
+                             Extractor.record_key(),
                              WindowAggregation.count()))
     command = commands(state)[0]
     assert "emit_feed" not in command

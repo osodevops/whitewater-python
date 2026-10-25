@@ -217,6 +217,7 @@ model — names, never partitions or Nodes. See
 
 
 ```python
+from datetime import timedelta
 
 # Pipe declaration: the client names the business key, source and
 # outputs — the server owns panes, leases and the effect journal.
@@ -229,12 +230,12 @@ client.define_enrich_pipe("orders.enrich", "orders.sub",
     quarantine_feed="orders.enrich.dlq")
 client.define_window_pipe("orders.hourly", "orders.sub",
     "stats.orders.hourly",
-    PipeOperation.window(3_600_000_000_000,  # window_ns: 1h
+    PipeOperation.window(timedelta(hours=1),  # 1h panes
         Extractor.record_key(), WindowAggregation.count(),
         time=WindowTime.EVENT,
-        watermark_ns=300_000_000_000,  # 5m horizon
-        grace_ns=30_000_000_000,       # 30s late revisions
-        expire_ns=7_200_000_000_000),
+        watermark=timedelta(minutes=5),  # 5m horizon
+        grace=timedelta(seconds=30),     # 30s late revisions
+        expire=timedelta(hours=2)),
     emit_feed="orders.hourly.emitted")
 
 # Pipe lifecycle: describe, pause, resume, drop.

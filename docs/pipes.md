@@ -92,30 +92,35 @@ client.define_window_pipe(
     "orders.sub",
     "ops.order.counts",                 # pane store (declared above)
     PipeOperation.window(
-        3_600_000_000_000,              # window_ns: 1h
+        timedelta(hours=1),             # 1h panes
         Extractor.json("$.region"),
         WindowAggregation.sum(Extractor.json("$.total")),
         time=WindowTime.EVENT,          # or WindowTime.INGEST
-        watermark_ns=300_000_000_000,   # event-time close horizon
-        grace_ns=60_000_000_000,        # revise emitted panes up to 1min late
-        expire_ns=86_400_000_000_000,   # keep panes 24h
+        watermark=timedelta(minutes=5), # event-time close horizon
+        grace=timedelta(minutes=1),     # revise emitted panes up to 1min late
+        expire=timedelta(hours=24),     # keep panes 24h
         key_limit=10_000,
     ),
     emit_feed="ops.hourly.emits",       # optional closed-pane output
 )
 ```
 
+Every window duration is a `datetime.timedelta` — the SDK extracts
+nanoseconds internally for the wire; callers never spell raw nanosecond
+counts.
+
 ### Lateness models — pick exactly one
 
-- `max_late_ns` — ingest-clock bound; later arrivals quarantine into a
+- `max_late` — ingest-clock bound; later arrivals quarantine into a
   countable `late` row.
-- `watermark_ns` — event-time horizon `max(event_time) − watermark_ns`
+- `watermark` — event-time horizon `max(event_time) − watermark`
   closes a pane once it passes the pane end (refused under
-  `WindowTime.INGEST`); `grace_ns` lets late events revise an emitted pane
+  `WindowTime.INGEST`); `grace` lets late events revise an emitted pane
   before counting into `late`.
 
-An emit feed requires a declared lateness model. All `*_ns` values are
-`int` nanoseconds; `None` leaves a bound unset.
+An emit feed requires a declared lateness model. `None` leaves a bound
+unset; the `*_ns` fields on the wire carry the nanoseconds the SDK
+extracts.
 
 ### Aggregations
 

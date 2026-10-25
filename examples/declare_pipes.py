@@ -29,6 +29,7 @@ Run against the dev cluster:
 """
 
 import os
+from datetime import timedelta
 
 from whitewater import (
     EnrichMiss,
@@ -97,12 +98,12 @@ client.define_window_pipe(
     "window.sub",
     "ops.minute.totals",
     PipeOperation.window(
-        60_000_000_000,
+        timedelta(minutes=1),
         Extractor.record_key(),
         WindowAggregation.sum(Extractor.json("amount")),
         time=WindowTime.EVENT,
-        max_late_ns=5_000_000_000,
-        expire_ns=3_600_000_000_000,
+        max_late=timedelta(seconds=5),
+        expire=timedelta(hours=1),
     ),
     emit_feed="ops.panes",
 )

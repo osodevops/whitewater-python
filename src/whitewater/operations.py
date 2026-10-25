@@ -7,6 +7,7 @@ from __future__ import annotations
 import base64
 import uuid
 from dataclasses import dataclass, field
+from datetime import timedelta
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
 
@@ -172,6 +173,24 @@ def _require_extractor(value: Any, where: str) -> Extractor:
     return value
 
 
+def _require_duration(value: Any, where: str) -> None:
+    """A declared duration must be a ``timedelta`` — callers express
+    time in human units; the SDK extracts nanoseconds for the wire."""
+    if value is not None and not isinstance(value, timedelta):
+        raise TypeError(
+            f"{where} requires a datetime.timedelta — "
+            f"e.g. timedelta(seconds=30), got {type(value).__name__}"
+        )
+
+
+def _duration_ns(value: timedelta) -> int:
+    """The exact nanosecond count a ``timedelta`` carries — the wire
+    encoding. ``days``/``seconds``/``microseconds`` are ints, so the
+    extraction loses nothing."""
+    return ((value.days * 86_400 + value.seconds) * 1_000_000_000
+            + value.microseconds * 1_000)
+
+
 @dataclass(frozen=True)
 class WindowAggregation:
     """What a ``window`` Pipe adds to each pane's accumulator: ``count``
@@ -216,6 +235,8 @@ class PipeOperation:
     freshness: Union[EnrichFreshness, str] = EnrichFreshness.LATEST
     named: Optional[str] = None
     on_miss: Union[EnrichMiss, str] = EnrichMiss.FORWARD
+    #: Internal nanosecond encodings extracted from the ``timedelta``
+    #: durations the builders accept — never caller-facing units.
     window_ns: Optional[int] = None
     aggregation: Optional[WindowAggregation] = None
     time: Union[WindowTime, str] = WindowTime.EVENT
@@ -253,27 +274,47 @@ class PipeOperation:
 
     @staticmethod
     def window(
-        window_ns: int,
+        window: timedelta,
         key: Extractor,
         aggregation: WindowAggregation,
         *,
         time: Union[WindowTime, str] = WindowTime.EVENT,
-        max_late_ns: Optional[int] = None,
-        watermark_ns: Optional[int] = None,
-        grace_ns: Optional[int] = None,
-        expire_ns: Optional[int] = None,
+        max_late: Optional[timedelta] = None,
+        watermark: Optional[timedelta] = None,
+        grace: Optional[timedelta] = None,
+        expire: Optional[timedelta] = None,
         key_limit: Optional[int] = None,
         byte_limit: Optional[int] = None,
     ) -> "PipeOperation":
-        """Accumulate each delivered record into fixed ``window_ns``-wide
+        """Accumulate each delivered record into fixed ``window``-wide
         panes of a managed StateStore view. Panes are immutable once
-        written; ``max_late_ns`` bounds late-event policy (later arrivals
-        quarantine into a countable ``late`` row) and ``expire_ns`` bounds
-        pane retention once the pane provably closes."""
-        if isinstance(window_ns, bool) or not isinstance(window_ns, int):
-            raise TypeError("window_ns must be an int of nanoseconds")
-        if window_ns <= 0:
-            raise ValueError("window_ns must be positive")
+        written; ``max_late`` bounds late-event policy (later arrivals
+        quarantine into a countable ``late`` row) and ``expire`` bounds
+        pane retention once the pane provably closes. Every duration is
+        a :class:`datetime.timedelta` — the SDK extracts nanoseconds
+        internally for the wire."""
+        _require_duration(window, "window")
+        if window <= timedelta(0):
+            raise ValueError("window must be a positive timedelta")
+        for name, bound in (("max_late", max_late), ("watermark", watermark),
+                            ("grace", grace), ("expire", expire)):
+            _require_duration(bound, name)
+            if bound is not None and bound <= timedelta(0):
+                raise ValueError(
+                    f"{name} must be a positive timedelta when declared")
+        if max_late is not None and watermark is not None:
+            raise ValueError(
+                "max_late and watermark are alternative lateness models — "
+                "declare exactly one")
+        if watermark is not None and WindowTime(time) is WindowTime.INGEST:
+            raise ValueError(
+                "watermark is meaningless under the ingest clock — the "
+                "horizon would follow arrival order, not event-time "
+                "disorder")
+        if grace is not None and watermark is None:
+            raise ValueError(
+                "grace requires watermark — revision bounds ride the "
+                "event-time horizon")
         if not isinstance(aggregation, WindowAggregation):
             raise TypeError(
                 "window aggregation is required — "
@@ -282,19 +323,21 @@ class PipeOperation:
         return PipeOperation(
             "window",
             key=_require_extractor(key, "window key"),
-            window_ns=window_ns,
+            window_ns=_duration_ns(window),
             aggregation=aggregation,
             time=WindowTime(time),
-            max_late_ns=max_late_ns,
-            watermark_ns=watermark_ns,
-            grace_ns=grace_ns,
-            expire_ns=expire_ns,
+            max_late_ns=None if max_late is None else _duration_ns(max_late),
+            watermark_ns=None if watermark is None else _duration_ns(watermark),
+            grace_ns=None if grace is None else _duration_ns(grace),
+            expire_ns=None if expire is None else _duration_ns(expire),
             key_limit=key_limit,
             byte_limit=byte_limit,
         )
 
     def to_wire(self) -> Dict[str, Any]:
-        """The tagged ``operation`` object ``define_pipe`` carries."""
+        """The tagged ``operation`` object ``define_pipe`` carries.
+        Duration fields land as ``*_ns`` counts — nanoseconds are the
+        wire encoding, never a caller-facing unit."""
         node: Dict[str, Any] = {"operation": self.operation}
         if self.key is not None:
             node["key"] = self.key.to_wire()
