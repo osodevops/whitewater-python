@@ -80,7 +80,8 @@ statement and calls `wcl` internally:
 
 ```python
 client.create_domain("shop")                       # CREATE DOMAIN shop;
-client.create_feed("shop.orders")                  # CREATE FEED shop.orders;
+shop = client.get_domain("shop")                   # verifies + materializes
+shop.create_feed("orders")                         # CREATE FEED shop.orders;
 client.create_writer("orders.writer", "shop.orders")
 client.open_writer_session("orders.writer")        # epoch comes back in .data
 client.create_reader("audit", "shop.orders", ReaderStart.beginning())
@@ -88,6 +89,10 @@ client.list_feeds()                                # SHOW FEEDS;
 client.seek_reader("audit", ReaderStart.now())     # SEEK READER ... TO NOW;
 client.drop_feed("shop.orders")                    # DROP FEED shop.orders;
 ```
+
+`client.create_feed("shop.orders")` with the fully-qualified name is
+the flat-name equivalent; `domain.create_feed("orders")` composes the
+Domain prefix for you.
 
 ### Typed Domains — the friendly door
 

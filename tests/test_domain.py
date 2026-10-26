@@ -203,6 +203,19 @@ class TestReaderStart:
             ReaderStart.timestamp(datetime.datetime(2024, 1, 1))
 
 
+def test_create_feed_scopes_inside_the_domain(client):
+    """shop.create_feed("orders") issues CREATE FEED shop.orders."""
+    client.create_domain("shop")
+    domain = client.get_domain("shop")
+    domain.create_feed("orders")
+    domain.refresh()
+    assert domain.feed("orders").name == "shop.orders"
+    assert "shop.orders" in domain.feed_names()
+    # A bare segment can't escape the Domain — relative names compose
+    # under shop., never into a sibling namespace.
+    assert domain.feed("x.y").name == "shop.x.y"
+
+
 def test_feed_schema_layers_feed_over_domain(client):
     client.wcl("""
         CREATE DOMAIN shop;

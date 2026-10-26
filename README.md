@@ -58,7 +58,7 @@ client = WhitewaterClient(
 
 | `client` (direct) | WCL + typed command execution (`/v1/admin/wcl`, `/v1/admin/commands`), node health â€” plus typed resource methods (`create_domain`, `create_feed`, `create_writer`, `create_reader`, `create_subscription`, `describe_feed`, `rename_feed`, `drop_feed`, `list_feeds`, `seek_reader`, `open_writer_session`, â€¦) that build the same WCL for you. `ReaderStart` (`beginning()`, `now()`, `cursor(c)`, `timestamp_ns(ns)`) supplies `START AT` positions |
 
-| `client.domain(name)` / `client.get_domain(name)` | **Strongly-typed Domain facade**: `domain()` is a lazy handle (free name composition, no I/O); `get_domain()` verifies the Domain exists and materializes its catalog view in one batched read — `domain.feeds("order")`, `feed_names()`, `readers()`, `writers()`, `subscriptions()`, `pipes()`, `indexes()`, `state_stores()`, `describe()`, `history_policy`, `refresh()`. `domain.feed("orders")` binds a typed `Feed` under the Domain's prefix |
+| `client.domain(name)` / `client.get_domain(name)` | **Strongly-typed Domain facade**: `domain()` is a lazy handle (free name composition, no I/O); `get_domain()` verifies the Domain exists and materializes its catalog view in one batched read — `domain.feeds("order")`, `feed_names()`, `readers()`, `writers()`, `subscriptions()`, `pipes()`, `indexes()`, `state_stores()`, `describe()`, `history_policy`, `refresh()`. `domain.feed("orders")` binds a typed `Feed` under the Domain's prefix; `domain.create_feed("orders")` declares it |
 
 | `client.writer(name, epoch)` | Idempotent single and batch appends (`request_id` dedup) |
 
@@ -80,6 +80,7 @@ from whitewater import ReaderStart
 
 shop = client.get_domain("shop")          # verifies + materializes now
 # client.domain("shop") is the lazy form — zero I/O until needed
+shop.create_feed("orders")              # CREATE FEED shop.orders;
 
 shop.feed_names()                         # ['shop.orders', 'shop.returns']
 [f.name for f in shop.feeds("order")]     # prefix-filtered Feed handles
@@ -376,7 +377,7 @@ classes are the explicit escape hatches for the same wire contract.
 | Area | API |
 |---|---|
 | Client & transport | `WhitewaterClient(api_key, endpoints, timeout)` · `healthy()` · `use_compression` on feeds/writers · `close()` |
-| Typed Domains | `domain(name)` lazy / `get_domain(name)` eager · `name` `domain_id` `revision` `describe()` `history_policy` `refresh()` · `feeds(prefix)` `feed_names()` `readers()` `writers()` `subscriptions()` `pipes()` `indexes()` `state_stores()` · `feed(relative, codecs/types)` `get_feed` |
+| Typed Domains | `domain(name)` lazy / `get_domain(name)` eager · `name` `domain_id` `revision` `describe()` `history_policy` `refresh()` · `feeds(prefix)` `feed_names()` `readers()` `writers()` `subscriptions()` `pipes()` `indexes()` `state_stores()` · `feed(relative, codecs/types)` `get_feed` · `create_feed(relative)` |
 | Schemas | `set_domain_schema` `set_feed_schema` `clear_domain_schema` `clear_feed_schema` · `Domain.schema()` `feed_schema()` `declared_feed_schema()` · `SchemaDecl`/`FeedSchema` — `json`, `jsonschema`, `avro`, `protobuf`, `text`, `bytes`, `custom.<name>` |
 | Feeds | `feed(name, key_codec=, value_codec=)` → `Feed` · `use_compression` · `records()` `fetch()` `load()` · `writer` `append` `reader` `subscribe` `consumer` `view` `view_types` |
 | Writing | `FeedWriter.append(key, value)` `append_event` `append_all` · `use_compression` `session_epoch` · idempotent `request_id` · `FeedEvent.with_request_id/.with_event_time_ns/.with_metadata/.text_metadata` |

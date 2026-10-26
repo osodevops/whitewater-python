@@ -245,6 +245,15 @@ class Domain:
         """Alias of :meth:`feed`."""
         return self.feed(relative, **kwargs)
 
+    def create_feed(self, relative: str) -> ControlExecution:
+        """Execute ``CREATE FEED`` inside this Domain —
+        ``shop.create_feed("orders")`` declares ``shop.orders``.
+        :meth:`refresh` (or a lazy accessor's first load) surfaces it
+        through :meth:`feeds`/:meth:`feed_names`.
+        """
+        return self._client.create_feed(self._resolve(relative))
+
+
     def _resolve(self, relative: str) -> str:
         if relative is None:
             raise TypeError("feed name is required")
