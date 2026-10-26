@@ -110,11 +110,11 @@ class TestReaderBuilder:
     def test_open_declares_reader_and_reads(self, client):
         client.create_feed("shop.orders")
         writer = (
-            client.create_writer(client.domain("shop"), "orders")
+            client.create_writer(client.domain("shop"), client.domain("shop").feed("orders", value_type=str))
             .writer_id("ingest")
             .open()
         )
-        writer.append("order-1", b'{"total": 9}')
+        writer.append("order-1", '{"total": 9}')
 
         reader = (
             client.create_reader(client.domain("shop"), "orders")
@@ -171,16 +171,16 @@ class TestWriterBuilder:
     def test_open_declares_writer_and_appends(self, client):
         client.create_feed("shop.orders")
         writer = (
-            client.create_writer(client.domain("shop"), "orders")
+            client.create_writer(client.domain("shop"), client.domain("shop").feed("orders", value_type=str))
             .writer_id("orders.ingest")
             .open()
         )
-        writer.append("k1", b"payload")
+        writer.append("k1", "payload")
 
     def test_writer_id_is_required(self, client):
         client.create_feed("shop.orders")
         with pytest.raises(ValueError, match="writer_id"):
-            client.create_writer(client.domain("shop"), "orders").open()
+            client.create_writer(client.domain("shop"), client.domain("shop").feed("orders", value_type=str)).open()
 
 
 class TestReaderStart:
@@ -223,8 +223,8 @@ def test_domain_hanging_builders_compose_and_open(client):
     shop = client.get_domain("shop")
     shop.create_feed("orders")
 
-    writer = shop.create_writer("orders").writer_id("ingest").open()
-    writer.append("order-1", b"1")
+    writer = shop.create_writer(shop.feed("orders", value_type=str)).writer_id("ingest").open()
+    writer.append("order-1", "1")
 
     reader = (shop.create_reader("orders")
               .reader_id("fulfillment")
@@ -237,9 +237,9 @@ def test_domain_hanging_builders_compose_and_open(client):
 def test_reader_for_each_acks_handled_pages(client):
     client.create_feed("shop.orders")
     shop = client.domain("shop")
-    writer = shop.create_writer("orders").writer_id("w").open()
-    writer.append("a", b"1")
-    writer.append("b", b"2")
+    writer = shop.create_writer(shop.feed("orders", value_type=str)).writer_id("w").open()
+    writer.append("a", "1")
+    writer.append("b", "2")
 
     reader = (shop.create_reader("orders")
               .reader_id("pump")
@@ -264,7 +264,7 @@ def test_reader_listen_pumps_on_an_sdk_owned_thread(client):
     import time
     client.create_feed("shop.orders")
     shop = client.domain("shop")
-    shop.create_writer("orders").writer_id("w").open().append("a", b"1")
+    shop.create_writer(shop.feed("orders", value_type=str)).writer_id("w").open().append("a", "1")
 
     reader = (shop.create_reader("orders")
               .reader_id("listener")
@@ -306,7 +306,7 @@ def test_reader_listen_pumps_on_an_sdk_owned_thread(client):
 def test_reader_iterates_records_per_page(client):
     client.create_feed("shop.orders")
     shop = client.domain("shop")
-    shop.create_writer("orders").writer_id("w").open().append("a", b"1")
+    shop.create_writer(shop.feed("orders", value_type=str)).writer_id("w").open().append("a", "1")
     reader = (shop.create_reader("orders")
               .reader_id("iter")
               .reader_start_point(ReaderStart.BEGINNING)

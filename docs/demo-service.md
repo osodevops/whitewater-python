@@ -24,12 +24,15 @@ shop.create_feed("orders")
 shop.create_feed("orders.dlq")            # dead-letter feed
 
 # ---- produce (usually a different service) --------------------------
-writer = shop.create_writer("orders").writer_id("orders.ingest").open()
-writer.append("order-1", b'{"total":42}')
+# Bind codecs on the Feed handle — the SDK serializes, never b"...".
+orders = shop.feed("orders", value_type=str)          # JSON text payloads
+writer = shop.create_writer(orders).writer_id("orders.ingest").open()
+writer.append("order-1", '{"total":42}')
 
 # ---- consume ---------------------------------------------------------
-dead_letter = shop.create_writer("orders.dlq").writer_id("fulfillment.dlq").open()
-reader = (shop.create_reader("orders")
+dlq = shop.feed("orders.dlq", value_type=str)
+dead_letter = shop.create_writer(dlq).writer_id("fulfillment.dlq").open()
+reader = (shop.create_reader(orders)
           .reader_id("fulfillment")          # durable id — survives restarts
           .reader_start_point(ReaderStart.BEGINNING)   # first-declare only
           .max_page_size(250)                # max records per fetch page

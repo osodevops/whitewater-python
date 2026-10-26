@@ -22,12 +22,12 @@ an existing store has no effect server-side.
 ## Writing
 
 ```python
-store.put(b"user-1", b"profile-1",
+store.put("user-1", profile,
           named={"passport": "P111", "department": "eng"})
-store.put(b"user-2", b"profile-2",
+store.put("user-2", profile2,
           named={"department": "eng"},
           mutation_id=uuid4())               # caller-owned idempotency
-store.delete(b"user-1")
+store.delete("user-1")
 ```
 
 - `put(key, payload, named=...)` commits one journaled `put_row`
@@ -47,7 +47,7 @@ store.delete(b"user-1")
 ## Reading
 
 ```python
-row = store.get(b"user-1")                   # StoreRow | None
+row = store.get("user-1")                   # StoreRow | None
 row.payload                                  # bytes
 row.freshness                                # applied_seq / committed_seq
                                              # / behind / served_by

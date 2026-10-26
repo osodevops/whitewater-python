@@ -204,7 +204,7 @@ store = (client.state_stores.define(
 
 
 
-store.put(b"user-1", b"profile-1",
+store.put("user-1", profile,
 
           named={"passport": "P111", "department": "eng"})        # typed values
 
