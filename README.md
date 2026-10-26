@@ -58,6 +58,8 @@ client = WhitewaterClient(
 
 | `client` (direct) | WCL + typed command execution (`/v1/admin/wcl`, `/v1/admin/commands`), node health â€” plus typed resource methods (`create_domain`, `create_feed`, `create_writer`, `create_reader`, `create_subscription`, `describe_feed`, `rename_feed`, `drop_feed`, `list_feeds`, `seek_reader`, `open_writer_session`, â€¦) that build the same WCL for you. `ReaderStart` (`beginning()`, `now()`, `cursor(c)`, `timestamp_ns(ns)`) supplies `START AT` positions |
 
+| `client.domain(name)` / `client.get_domain(name)` | **Strongly-typed Domain facade**: `domain()` is a lazy handle (free name composition, no I/O); `get_domain()` verifies the Domain exists and materializes its catalog view in one batched read — `domain.feeds("order")`, `feed_names()`, `readers()`, `writers()`, `subscriptions()`, `pipes()`, `indexes()`, `state_stores()`, `describe()`, `history_policy`, `refresh()`. `domain.feed("orders")` binds a typed `Feed` under the Domain's prefix |
+
 | `client.writer(name, epoch)` | Idempotent single and batch appends (`request_id` dedup) |
 
 | `client.reader(name)` | Named-Reader sessions: open / fetch / ack / close / resume |
@@ -66,6 +68,48 @@ client = WhitewaterClient(
 
 | `client.feed(name[, value_type/value_codec])` | **Typed feed facade**: binds `codecs` once so keys/payloads serialize automatically in both directions â€” `feed.writer(name)` (declares + opens a session), `feed.reader(name, capacity)` (decoded `fetch`/`ack`, context-managed), `feed.fetch`/`records`/`load` (decoded ad-hoc reads), `feed.subscribe` (decoded batches). Same codec vocabulary as `state_store`: `str`/`bytes`/JSON dataclasses out of the box, protobuf/msgpack/custom via `codecs.of` |
 See [docs/stores.md](docs/stores.md) for the full store guide.
+
+### Typed Domains — navigate, don't concatenate
+
+A Domain owns every Feed it prefixes (`shop` owns `shop.orders`), so the
+friendliest surface navigates domain → feed → reader/writer instead
+of composing dotted names by hand:
+
+```python
+from whitewater import ReaderStart
+
+shop = client.get_domain("shop")          # verifies + materializes now
+# client.domain("shop") is the lazy form — zero I/O until needed
+
+shop.feed_names()                         # ['shop.orders', 'shop.returns']
+[f.name for f in shop.feeds("order")]     # prefix-filtered Feed handles
+shop.readers(); shop.writers()            # scoped catalog views
+shop.describe(); shop.history_policy
+
+orders = shop.feed("orders", value_type=Order)   # typed Feed handle
+
+writer = (client.create_writer(shop, orders)
+          .writer_id("orders.ingest")
+          .open())
+writer.append("order-1", Order("order-1", 42))
+
+with (client.create_reader(shop, orders)
+      .reader_id("fulfillment")                    # durable id — the Kafka groupId analogue
+      .reader_start_point(ReaderStart.BEGINNING)   # first-declare only
+      .capacity(256)
+      .open()) as reader:
+    for record in reader.fetch().records:
+        handle(record.value)
+    reader.ack()
+```
+
+`reader_id` is durable application state: `reader_start_point` applies
+only when the Reader is first declared — an existing Reader resumes its
+acknowledged frontier (the `auto.offset.reset` mapping). A `Feed` bound
+to another Domain is refused locally, before any network call. The
+first catalog accessor issues ONE batched control read (`describe
+domain` + every `show` listing) and caches the snapshot — `refresh()`
+re-pulls.
 
 ### Permanent consumers — the Kafka loop without the plumbing
 

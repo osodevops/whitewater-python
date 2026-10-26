@@ -89,6 +89,53 @@ client.seek_reader("audit", ReaderStart.now())     # SEEK READER ... TO NOW;
 client.drop_feed("shop.orders")                    # DROP FEED shop.orders;
 ```
 
+### Typed Domains — the friendly door
+
+A Domain owns every Feed it prefixes (`shop` owns `shop.orders`), so
+`client.domain(name)` returns a strongly-typed facade that navigates the
+namespace instead of concatenating dotted names:
+
+- `client.domain(name)` — a lazy handle. `domain.feed("orders")` is
+  pure name composition (`shop.orders`); no I/O until a catalog
+  accessor runs. `domain(name)` never fails for a missing Domain.
+- `client.get_domain(name)` — `domain()` plus an immediate snapshot
+  load: the Domain's existence is verified up front.
+- The first catalog accessor issues ONE batched `commands` call
+  (`describe domain` + `show` for feeds/readers/writers/subscriptions/
+  pipes/indexes/state_stores), joins rows by `space_id`/`feed_id`, and
+  caches the snapshot. `domain.refresh()` re-pulls.
+- Scoped views: `feed_names()`, `feeds(prefix)`, `readers()`,
+  `writers()`, `subscriptions()`, `pipes()`, `indexes()`,
+  `state_stores()`, `describe()`, `history_policy`, `domain_id`,
+  `revision`.
+
+`client.create_reader(domain, feed)` / `create_writer(domain, feed)`
+return fluent builders instead of executing WCL directly — the Domain
+overload is detected by type, so the legacy `create_reader(name, feed,
+start)` string form is unchanged:
+
+```python
+reader = (client.create_reader(shop, shop.feed("orders"))
+          .reader_id("fulfillment")                    # required — durable id
+          .reader_start_point(ReaderStart.BEGINNING)   # or .END, .cursor(c), .timestamp(dt)
+          .capacity(256)
+          .open())                                     # FeedReader — decoded messages
+
+writer = (client.create_writer(shop, "orders")         # str names are relative
+          .writer_id("orders.ingest")
+          .open())                                     # FeedWriter
+```
+
+Builder semantics:
+
+- `reader_id`/`writer_id` are required — the durable resource identity.
+- `reader_start_point` applies only on first declaration; an existing
+  Reader resumes its acknowledged frontier.
+- `.declare()` provisions without opening a session (fails when the
+  name is taken); `.open()` declares-when-missing then opens.
+- A `Feed` object bound to another Domain fails locally — before any
+  network call. String names are always relative to the Domain.
+
 `client.commands([...])` is the second door — the typed JSON command
 path for what WCL does not spell. Declaring a StateStore with named
 keys is the current example (there is no `DEFINE STATESTORE` WCL

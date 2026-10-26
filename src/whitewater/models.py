@@ -50,6 +50,24 @@ class ReaderStart:
         """From a signed Unix epoch nanosecond timestamp."""
         return ReaderStart("timestamp", nanos=nanos)
 
+    @staticmethod
+    def timestamp(when: "datetime.datetime") -> "ReaderStart":
+        """From a timezone-aware ``datetime`` — converted to epoch
+        nanoseconds with integer arithmetic (no float rounding)."""
+        import datetime as _dt
+
+        if not isinstance(when, _dt.datetime):
+            raise TypeError("timestamp() takes a datetime")
+        if when.tzinfo is None:
+            raise ValueError("timestamp() takes a timezone-aware datetime")
+        delta = when - _dt.datetime(1970, 1, 1, tzinfo=_dt.timezone.utc)
+        nanos = (
+            delta.days * 86_400_000_000_000
+            + delta.seconds * 1_000_000_000
+            + delta.microseconds * 1_000
+        )
+        return ReaderStart.timestamp_ns(nanos)
+
     @property
     def wcl(self) -> str:
         """The WCL ``START AT`` operand, e.g. ``BEGINNING``."""
@@ -61,6 +79,11 @@ class ReaderStart:
         if self.kind == "timestamp":
             return f"TIMESTAMP {self.nanos}"
         return "BEGINNING"
+
+
+# Fluent start-position constants — ``reader_start_point(ReaderStart.BEGINNING)``.
+ReaderStart.BEGINNING = ReaderStart.beginning()
+ReaderStart.END = ReaderStart.now()
 
 
 @dataclass(frozen=True)

@@ -25,6 +25,11 @@ from .feed import (
     FeedReaderPage,
     FeedWriter,
 )
+from .domain import (
+    Domain,
+    ReaderBuilder,
+    WriterBuilder,
+)
 from .operations import (
     DemandReport,
     DemandRow,
@@ -84,6 +89,7 @@ __all__ = [
     "Conflict",
     "ControlExecution",
     "Cursor",
+    "Domain",
     "Extractor",
     "FakeRiverbed",
     "Feed",
@@ -102,6 +108,7 @@ __all__ = [
     "MutationResult",
     "NamedKey",
     "ReaderPage",
+    "ReaderBuilder",
     "ReaderSession",
     "ReaderSessionClient",
     "ReaderStart",
@@ -137,6 +144,7 @@ __all__ = [
     "Unavailable",
     "WhitewaterClient",
     "WhitewaterError",
+    "WriterBuilder",
     "WorkLease",
     "WriterSessionClient",
     "codecs",

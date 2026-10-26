@@ -507,9 +507,9 @@ class Feed(Generic[K, V]):
             if "exists" not in str(e).lower():
                 raise
 
-    def _ensure_reader(self, reader_name: str) -> None:
+    def _ensure_reader(self, reader_name: str, start=None) -> None:
         try:
-            self._client.create_reader(reader_name, self.name)
+            self._client.create_reader(reader_name, self.name, start)
         except Refused as e:
             if "exists" not in str(e).lower():
                 raise

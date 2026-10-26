@@ -569,16 +569,57 @@ class WhitewaterClient:
         """``CREATE FEED <dotted.name>``"""
         return self.wcl("CREATE FEED " + _dotted(name))
 
-    def create_writer(self, name: str, feed: str) -> ControlExecution:
-        """``CREATE WRITER <name> TO <feed>``"""
-        return self.wcl(f"CREATE WRITER {_resource(name)} TO {_dotted(feed)}")
+    def create_writer(self, name_or_domain, feed=None):
+        """``CREATE WRITER <name> TO <feed>`` — or, when the first
+        argument is a :class:`Domain`, a fluent
+        :class:`WriterBuilder`: ``client.create_writer(domain, feed)
+        .writer_id("orders.ingest").open()``."""
+        from .domain import Domain, WriterBuilder, _as_feed
+
+        if isinstance(name_or_domain, Domain):
+            return WriterBuilder(self, name_or_domain, _as_feed(name_or_domain, feed))
+        return self.wcl(
+            f"CREATE WRITER {_resource(name_or_domain)} TO {_dotted(feed)}"
+        )
 
     def create_reader(
-        self, name: str, feed: str, start: Optional["ReaderStart"] = None
-    ) -> ControlExecution:
+        self, name_or_domain, feed=None, start: Optional["ReaderStart"] = None
+    ):
         """``CREATE READER <name> FROM <feed> [START AT <start>]`` — BEGINNING
-        when ``start`` is omitted."""
-        return self._create_from("READER", name, feed, start or ReaderStart.beginning())
+        when ``start`` is omitted. When the first argument is a
+        :class:`Domain`, returns a fluent :class:`ReaderBuilder`:
+        ``client.create_reader(domain, feed).reader_id("audit")
+        .reader_start_point(ReaderStart.BEGINNING).open()``."""
+        from .domain import Domain, ReaderBuilder, _as_feed
+
+        if isinstance(name_or_domain, Domain):
+            builder = ReaderBuilder(self, name_or_domain, _as_feed(name_or_domain, feed))
+            return builder.reader_start_point(start) if start is not None else builder
+        return self._create_from(
+            "READER", name_or_domain, feed, start or ReaderStart.beginning()
+        )
+
+    # ---- strongly-typed Domains ---------------------------------------------
+    # A Domain owns every Feed it prefixes (shop owns shop.orders). The
+    # typed entry point:
+    #
+    #   shop = client.domain("shop")
+    #   reader = (client.create_reader(shop, shop.get_feed("orders"))
+    #       .reader_id("fulfillment")
+    #       .reader_start_point(ReaderStart.BEGINNING)
+    #       .open())
+
+    def domain(self, name: str) -> "Domain":
+        """A lazy :class:`Domain` handle — no I/O until a catalog
+        accessor runs; :meth:`Domain.feed` name composition stays free."""
+        from .domain import Domain
+
+        return Domain(self, name)
+
+    def get_domain(self, name: str) -> "Domain":
+        """:meth:`domain` plus an immediate snapshot load — verifies the
+        Domain exists now."""
+        return self.domain(name).refresh()
 
     def create_subscription(
         self, name: str, feed: str, start: Optional["ReaderStart"] = None
