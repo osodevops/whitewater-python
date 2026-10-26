@@ -66,7 +66,7 @@ client = WhitewaterClient(
 
 | `client.subscription_member(sub)` | Join, claim, renew, fetch, ack, release under fenced leases |
 
-| `client.feed(name[, value_type/value_codec])` | **Typed feed facade**: binds `codecs` once so keys/payloads serialize automatically in both directions â€” `feed.writer(name)` (declares + opens a session), `feed.reader(name, capacity)` (decoded `fetch`/`ack`, context-managed), `feed.fetch`/`records`/`load` (decoded ad-hoc reads), `feed.subscribe` (decoded batches). Same codec vocabulary as `state_store`: `str`/`bytes`/JSON dataclasses out of the box, protobuf/msgpack/custom via `codecs.of` |
+| `client.feed(name[, value_type/value_codec])` | **Typed feed facade**: binds `codecs` once so keys/payloads serialize automatically in both directions â€” `feed.writer(name)` (declares + opens a session), `feed.reader(name, max_page_size)` (decoded `fetch`/`ack`, context-managed), `feed.fetch`/`records`/`load` (decoded ad-hoc reads), `feed.subscribe` (decoded batches). Same codec vocabulary as `state_store`: `str`/`bytes`/JSON dataclasses out of the box, protobuf/msgpack/custom via `codecs.of` |
 See [docs/stores.md](docs/stores.md) for the full store guide.
 
 ### Typed Domains — navigate, don't concatenate
@@ -99,10 +99,11 @@ writer.append("order-1", Order("order-1", 42))
 with (shop.create_reader("orders")
       .reader_id("fulfillment")                    # durable id — the Kafka groupId analogue
       .reader_start_point(ReaderStart.BEGINNING)   # first-declare only
-      .capacity(256)
+      .max_page_size(256)
       .open()) as reader:
-    reader.for_each(lambda m: handle(m.value))     # per-record pump: deliver → ack each page
-    # or iterate: `for m in reader:` — same ack-per-page semantics
+    pump = reader.listen(lambda m: handle(m.value))  # SDK-owned thread — returns now
+    # pump.stop() releases thread + session; pump.failure surfaces a raised handler
+    # or iterate: `for m in reader:` / `reader.for_each(h)` — same ack-per-page semantics
     # or stay manual: fetch() → handle records → ack()
 ```
 
@@ -164,7 +165,7 @@ consumer.run()
   `consumer.close()` (safe from signals/atexit; the in-flight page
   finishes and acks first).
 - `run_async(handler)` is the same supervised consumer on its own
-  thread; `.backoff(initial_s, max_s)`, `.capacity(n)`,
+  thread; `.backoff(initial_s, max_s)`, `.max_page_size(n)`,
   `.start_at(...)`, `.on_error(fn)`, `.last_error`, `.is_running` tune
   and observe it.
 - `feed.subscribe(...)` remains for page-oriented loops that want raw
@@ -235,7 +236,7 @@ orders = client.feed("orders.events", value_type=Order)
 
 orders.writer("ingest").append("order-1", Order("order-1", 42))
 
-with orders.reader("audit", capacity=64) as reader:
+with orders.reader("audit", max_page_size=64) as reader:
 
     order = reader.fetch().records[0].value          # decoded Order
 
@@ -383,9 +384,9 @@ classes are the explicit escape hatches for the same wire contract.
 | Schemas | `set_domain_schema` `set_feed_schema` `clear_domain_schema` `clear_feed_schema` · `Domain.schema()` `feed_schema()` `declared_feed_schema()` · `SchemaDecl`/`FeedSchema` — `json`, `jsonschema`, `avro`, `protobuf`, `text`, `bytes`, `custom.<name>` |
 | Feeds | `feed(name, key_codec=, value_codec=)` → `Feed` · `use_compression` · `records()` `fetch()` `load()` · `writer` `append` `reader` `subscribe` `consumer` `view` `view_types` |
 | Writing | `FeedWriter.append(key, value)` `append_event` `append_all` · `use_compression` `session_epoch` · idempotent `request_id` · `FeedEvent.with_request_id/.with_event_time_ns/.with_metadata/.text_metadata` |
-| Reading | `FeedReader.fetch(limit)` `ack()` `close()` · `session_epoch` `acknowledged_cursor` · durable `reader_id` · `ReaderStart` — `BEGINNING`, `END`, `now()`, `cursor`, `timestamp(datetime)` |
+| Reading | `FeedReader.listen(handler)` SDK-owned pump → `ReaderPump` (`stop()` `failure` `running`) · `for_each(h)` blocking pump · `for m in reader` iterator · `fetch(limit)` `ack()` `close()` · `session_epoch` `acknowledged_cursor` · durable `reader_id` · `ReaderStart` — `BEGINNING`, `END`, `now()`, `cursor`, `timestamp(datetime)` |
 | Temporary fetches | `Feed.fetch(after=, limit=)` / `FeedClient.temporary_fetch` — `after_event_time_ns` seeks, `new_only`, `tail` + `wait_ms` long-poll · `Feed.records` `Feed.load` |
-| Consumers | `feed.consumer(reader)` → `FeedConsumer`: `start_at` `capacity` `on_record` `on_error` `backoff` `last_error` `is_running` · `run` / `run_async` / `close` |
+| Consumers | `feed.consumer(reader)` → `FeedConsumer`: `start_at` `max_page_size` `on_record` `on_error` `backoff` `last_error` `is_running` · `run` / `run_async` / `close` |
 | Subscription members | `subscription_member(name)` → `join` `claim` `renew` `release` `fetch` `ack` — shared progress + RF3 work leases · `client.subscribe(...)` managed loop |
 | StateStores | `state_store(name)` / `StateStore.named(name)` → `view` `view_types` `add_key` `named_keys` `put` `get` `get_by` `find` `find_by` `get_or_default` `delete` `page` `iterate` `clear` `drop` · `state_stores.define` `state_stores.drop` |
 | Indexes | `query_index(name, IndexPredicate)` → `IndexPage` · `IndexPredicate.exact/prefix/range` + `IndexBound` |

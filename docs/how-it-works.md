@@ -123,7 +123,7 @@ start)` string form is unchanged:
 reader = (shop.create_reader("orders")               # = client.create_reader(shop, …)
           .reader_id("fulfillment")                    # required — durable id
           .reader_start_point(ReaderStart.BEGINNING)   # or .END, .cursor(c), .timestamp(dt)
-          .capacity(256)
+          .max_page_size(256)
           .open())                                     # FeedReader — decoded messages
 
 writer = (shop.create_writer("orders")                 # str names are relative

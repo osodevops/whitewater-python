@@ -244,7 +244,7 @@ def test_reader_for_each_acks_handled_pages(client):
     reader = (shop.create_reader("orders")
               .reader_id("pump")
               .reader_start_point(ReaderStart.BEGINNING)
-              .capacity(1)
+              .max_page_size(1)
               .open())
     seen = []
     reader.for_each(lambda m: seen.append(m.key) or len(seen) < 2)
@@ -255,6 +255,51 @@ def test_reader_for_each_acks_handled_pages(client):
     # The unacked tail replays on the next open.
     again = shop.create_reader("orders").reader_id("pump").open()
     assert again.fetch().records[0].key == "b"
+    again.close()
+
+
+def test_reader_listen_pumps_on_an_sdk_owned_thread(client):
+    """reader.listen owns the pump thread — stop() closes the session;
+    a raised handler surfaces via pump.failure and the page replays."""
+    import time
+    client.create_feed("shop.orders")
+    shop = client.domain("shop")
+    shop.create_writer("orders").writer_id("w").open().append("a", b"1")
+
+    reader = (shop.create_reader("orders")
+              .reader_id("listener")
+              .reader_start_point(ReaderStart.BEGINNING)
+              .open())
+    seen = []
+    pump = reader.listen(lambda m: seen.append(m.key))
+    for _ in range(200):
+        if seen:
+            break
+        time.sleep(0.01)
+    assert seen == ["a"]
+    assert pump.failure is None
+    pump.stop()                          # thread + session released
+    assert not pump.running
+
+    # A raised handler stops the pump and the page replays.
+    reader2 = (shop.create_reader("orders")
+               .reader_id("failing")
+               .reader_start_point(ReaderStart.BEGINNING)
+               .open())
+    boom = RuntimeError("boom")
+
+    def bad(_m):
+        raise boom
+
+    pump2 = reader2.listen(bad)
+    for _ in range(200):
+        if pump2.failure is not None:
+            break
+        time.sleep(0.01)
+    assert pump2.failure is boom
+
+    again = shop.create_reader("orders").reader_id("failing").open()
+    assert again.fetch().records[0].key == "a"
     again.close()
 
 

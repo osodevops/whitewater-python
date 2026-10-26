@@ -815,7 +815,7 @@ class WhitewaterClient:
         start: ReaderStart,
         on_records: Callable[[List[Record]], None],
         on_error: Optional[Callable[[WhitewaterError], None]] = None,
-        capacity: Optional[int] = None,
+        max_page_size: Optional[int] = None,
     ) -> "Subscription":
         """Subscribe durably to a Feed: ensures a Reader named ``reader``
         exists (creating it at ``start`` when missing), opens a session,
@@ -835,7 +835,7 @@ class WhitewaterClient:
             reader,
             feed,
             start,
-            capacity or self._SUBSCRIBE_CAPACITY,
+            max_page_size or self._SUBSCRIBE_CAPACITY,
             on_records,
             on_error,
         )
@@ -883,7 +883,7 @@ class WhitewaterClient:
 
             orders = client.feed("orders.events", value_type=Order)
             orders.writer("ingest").append("order-1", order)   # encoded
-            with orders.reader("audit", capacity=64) as reader:
+            with orders.reader("audit", max_page_size=64) as reader:
                 order = reader.fetch().records[0].value        # decoded
 
         Default binding: ``str`` keys + ``bytes`` payloads. Codecs are

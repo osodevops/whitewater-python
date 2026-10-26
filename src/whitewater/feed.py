@@ -7,7 +7,7 @@ serialize automatically in both directions::
 
     orders.writer("ingest").append("order-1", Order("order-1", 42))
 
-    with orders.reader("audit", capacity=64) as reader:
+    with orders.reader("audit", max_page_size=64) as reader:
         for message in reader.fetch().records:
             handle(message.value)               # decoded — never .encode()
         reader.ack()
@@ -238,7 +238,7 @@ class FeedReader(Generic[K, V]):
     ``fetch`` returns a bounded page of decoded messages; ``ack`` commits
     the page's delivered Cursor durably::
 
-        with feed.reader("audit", capacity=64) as reader:
+        with feed.reader("audit", max_page_size=64) as reader:
             for message in reader.fetch().records:
                 handle(message.value)
             reader.ack()
@@ -330,6 +330,25 @@ class FeedReader(Generic[K, V]):
                 return
             self.ack()
 
+    def listen(
+        self, handler: Callable[["FeedMessage[K, V]"], object]
+    ) -> "ReaderPump[K, V]":
+        """Deliver records on an SDK-owned thread — returns
+        immediately::
+
+            pump = reader.listen(handle)     # service keeps running
+            ...
+            pump.stop()                      # stops thread + closes reader
+
+        Same delivery semantics as :meth:`for_each`: one record at a
+        time, each page acked after its records are handled, empty
+        fetches paced on ``retry_after_ms``. A raised handler stops the
+        pump — the in-flight page stays unacked and replays;
+        :attr:`ReaderPump.failure` carries the error. ``ReaderPump`` is
+        a context manager: ``with reader.listen(h) as pump:``.
+        """
+        return ReaderPump(self, handler)
+
     def __enter__(self) -> "FeedReader[K, V]":
         return self
 
@@ -345,7 +364,7 @@ class Feed(Generic[K, V]):
         orders = client.feed("orders.events", value_type=Order)
         orders.writer("ingest").append("order-1", Order("order-1", 42))
 
-        with orders.reader("audit", capacity=64) as reader:
+        with orders.reader("audit", max_page_size=64) as reader:
             page = reader.fetch()             # FeedMessage[str, Order]
 
     ``feed.view(...)`` rebinds the same feed under different codecs —
@@ -447,13 +466,13 @@ class Feed(Generic[K, V]):
 
     # ---- readers / subscriptions -------------------------------------------
 
-    def reader(self, reader_name: str, capacity: int = 64) -> FeedReader[K, V]:
+    def reader(self, reader_name: str, max_page_size: int = 64) -> FeedReader[K, V]:
         """A session-bound named Reader on this Feed: declares the Reader
         (at BEGINNING) when missing, opens a session, and returns decoded
         messages."""
         self._ensure_reader(reader_name)
         session_client = self._client.reader(reader_name)
-        session = session_client.open(capacity)
+        session = session_client.open(max_page_size)
         return FeedReader(session_client, session, self.key_codec, self.value_codec)
 
     def subscribe(
@@ -462,19 +481,19 @@ class Feed(Generic[K, V]):
         start: ReaderStart,
         on_records: Callable[[List[FeedMessage[K, V]]], None],
         on_error: Optional[Callable[[WhitewaterError], None]] = None,
-        capacity: Optional[int] = None,
+        max_page_size: Optional[int] = None,
     ):
         """A running subscription on this Feed: a named Reader polled on
         a background thread, delivering decoded batches and acknowledging
         durable progress after each."""
         return self._subscribe_decoded(
-            reader, start, capacity, on_records, on_error)
+            reader, start, max_page_size, on_records, on_error)
 
     def _subscribe_decoded(
         self,
         reader: str,
         start: ReaderStart,
-        capacity: Optional[int],
+        max_page_size: Optional[int],
         on_records: Callable[[List[FeedMessage[K, V]]], None],
         on_error: Optional[Callable[[WhitewaterError], None]],
     ):
@@ -484,7 +503,7 @@ class Feed(Generic[K, V]):
             start,
             lambda records: on_records([self._decode(r) for r in records]),
             on_error,
-            capacity=capacity,
+            max_page_size=max_page_size,
         )
 
     def consumer(self, reader: str) -> "FeedConsumer[K, V]":
@@ -565,6 +584,59 @@ class Feed(Generic[K, V]):
 _SENTINEL = object()
 
 
+class ReaderPump(Generic[K, V]):
+    """The SDK-owned pump returned by :meth:`FeedReader.listen` — owns a
+    daemon thread delivering records to the handler. :meth:`stop`
+    halts the thread and closes the reader session; the in-flight page
+    stays unacked so its tail replays on the next open.
+    :attr:`failure` reports why the pump died (a raised handler or a
+    transport error), or ``None`` while running / after a clean stop.
+    """
+
+    def __init__(self, reader: "FeedReader[K, V]", handler):
+        self._reader = reader
+        self._stop = threading.Event()
+        self._failure: Optional[BaseException] = None
+        self._thread = threading.Thread(
+            target=self._run, args=(handler,), daemon=True,
+            name="ww-reader-pump",
+        )
+        self._thread.start()
+
+    def _run(self, handler) -> None:
+        def deliver(message):
+            handler(message)
+            return not self._stop.is_set()
+
+        try:
+            self._reader.for_each(deliver)
+        except Exception as error:
+            if not self._stop.is_set() and not self._reader._closed:
+                self._failure = error
+
+    @property
+    def failure(self) -> Optional[BaseException]:
+        """The error that stopped the pump, or ``None``."""
+        return self._failure
+
+    @property
+    def running(self) -> bool:
+        """Whether the pump thread is still delivering."""
+        return self._thread.is_alive()
+
+    def stop(self) -> None:
+        """Stop the pump thread and close the reader session."""
+        self._stop.set()
+        self._reader.close()
+        self._thread.join(timeout=10.0)
+
+    def __enter__(self) -> "ReaderPump[K, V]":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.stop()
+
+
 class FeedConsumer(Generic[K, V]):
     """A permanent, supervised consumer: the durable-Reader equivalent
     of Kafka's ``while True: consumer.poll(...)`` loop, with the
@@ -601,7 +673,7 @@ class FeedConsumer(Generic[K, V]):
         self._feed = feed
         self._reader = reader
         self._start = ReaderStart.beginning()
-        self._capacity: Optional[int] = None
+        self._max_page_size: Optional[int] = None
         self._initial_backoff = 0.25
         self._max_backoff = 30.0
         self._on_record: Optional[Callable[[FeedMessage[K, V]], None]] = None
@@ -624,9 +696,9 @@ class FeedConsumer(Generic[K, V]):
         self._start = start
         return self
 
-    def capacity(self, capacity: int) -> "FeedConsumer[K, V]":
-        """Records fetched per page."""
-        self._capacity = capacity
+    def max_page_size(self, max_page_size: int) -> "FeedConsumer[K, V]":
+        """Max records delivered per page."""
+        self._max_page_size = max_page_size
         return self
 
     def on_record(
@@ -691,7 +763,7 @@ class FeedConsumer(Generic[K, V]):
                             raise
 
                 sub = self._feed._subscribe_decoded(
-                    self._reader, self._start, self._capacity,
+                    self._reader, self._start, self._max_page_size,
                     deliver, None)
                 self._current = sub
                 try:

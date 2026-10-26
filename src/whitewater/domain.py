@@ -16,7 +16,7 @@ of composing dotted names by hand::
     reader = (client.create_reader(shop, shop.get_feed("orders"))
               .reader_id("fulfillment")          # the Kafka groupId analogue
               .reader_start_point(ReaderStart.BEGINNING)
-              .capacity(256)
+              .max_page_size(256)
               .open())                          # FeedReader[str, bytes]
 
 The first catalog accessor issues ONE batched control read
@@ -391,7 +391,7 @@ class ReaderBuilder(Generic[K, V]):
         self._feed = feed
         self._reader_id: Optional[str] = None
         self._start = ReaderStart.beginning()
-        self._capacity = 128
+        self._max_page_size = 128
 
     def reader_id(self, reader_id: str) -> "ReaderBuilder[K, V]":
         """The durable Reader identity. Required before open/declare."""
@@ -406,11 +406,11 @@ class ReaderBuilder(Generic[K, V]):
         self._start = start
         return self
 
-    def capacity(self, capacity: int) -> "ReaderBuilder[K, V]":
-        """Bounded fetch page capacity — the default is 128."""
-        if capacity <= 0:
-            raise ValueError("capacity must be positive")
-        self._capacity = capacity
+    def max_page_size(self, max_page_size: int) -> "ReaderBuilder[K, V]":
+        """Max records delivered per fetch page — the default is 128."""
+        if max_page_size <= 0:
+            raise ValueError("max_page_size must be positive")
+        self._max_page_size = max_page_size
         return self
 
     def declare(self) -> ControlExecution:
@@ -425,7 +425,7 @@ class ReaderBuilder(Generic[K, V]):
         reader_id = self._require_id()
         self._feed._ensure_reader(reader_id, self._start)
         session_client = self._client.reader(reader_id)
-        session = session_client.open(self._capacity)
+        session = session_client.open(self._max_page_size)
         return FeedReader(
             session_client, session, self._feed.key_codec, self._feed.value_codec
         )
