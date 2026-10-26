@@ -22,6 +22,8 @@ pip install whitewater-client   # once published; pip install -e . for developme
 
 
 
+A complete microservice walkthrough — provision, produce, pump-process, dead-letter, shutdown — lives in [`docs/demo-service.md`](docs/demo-service.md).
+
 ## Clients
 
 
