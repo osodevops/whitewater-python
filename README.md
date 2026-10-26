@@ -366,6 +366,33 @@ values lower automatically (`str`/`int`/`bool`/`None`/`bytes`).
 
 
 
+## API surface
+
+Everything the SDK exposes, grouped by capability. The typed surface
+(`Domain` → `Feed` → writer/reader/consumer) covers the daily path;
+`commands`, `wcl`, and the `*SessionClient`/`SubscriptionMemberClient`
+classes are the explicit escape hatches for the same wire contract.
+
+| Area | API |
+|---|---|
+| Client & transport | `WhitewaterClient(api_key, endpoints, timeout)` · `healthy()` · `use_compression` on feeds/writers · `close()` |
+| Typed Domains | `domain(name)` lazy / `get_domain(name)` eager · `name` `domain_id` `revision` `describe()` `history_policy` `refresh()` · `feeds(prefix)` `feed_names()` `readers()` `writers()` `subscriptions()` `pipes()` `indexes()` `state_stores()` · `feed(relative, codecs/types)` `get_feed` |
+| Schemas | `set_domain_schema` `set_feed_schema` `clear_domain_schema` `clear_feed_schema` · `Domain.schema()` `feed_schema()` `declared_feed_schema()` · `SchemaDecl`/`FeedSchema` — `json`, `jsonschema`, `avro`, `protobuf`, `text`, `bytes`, `custom.<name>` |
+| Feeds | `feed(name, key_codec=, value_codec=)` → `Feed` · `use_compression` · `records()` `fetch()` `load()` · `writer` `append` `reader` `subscribe` `consumer` `view` `view_types` |
+| Writing | `FeedWriter.append(key, value)` `append_event` `append_all` · `use_compression` `session_epoch` · idempotent `request_id` · `FeedEvent.with_request_id/.with_event_time_ns/.with_metadata/.text_metadata` |
+| Reading | `FeedReader.fetch(limit)` `ack()` `close()` · `session_epoch` `acknowledged_cursor` · durable `reader_id` · `ReaderStart` — `BEGINNING`, `END`, `now()`, `cursor`, `timestamp(datetime)` |
+| Temporary fetches | `Feed.fetch(after=, limit=)` / `FeedClient.temporary_fetch` — `after_event_time_ns` seeks, `new_only`, `tail` + `wait_ms` long-poll · `Feed.records` `Feed.load` |
+| Consumers | `feed.consumer(reader)` → `FeedConsumer`: `start_at` `capacity` `on_record` `on_error` `backoff` `last_error` `is_running` · `run` / `run_async` / `close` |
+| Subscription members | `subscription_member(name)` → `join` `claim` `renew` `release` `fetch` `ack` — shared progress + RF3 work leases · `client.subscribe(...)` managed loop |
+| StateStores | `state_store(name)` / `StateStore.named(name)` → `view` `view_types` `add_key` `named_keys` `put` `get` `get_by` `find` `find_by` `get_or_default` `delete` `page` `iterate` `clear` `drop` · `state_stores.define` `state_stores.drop` |
+| Indexes | `query_index(name, IndexPredicate)` → `IndexPage` · `IndexPredicate.exact/prefix/range` + `IndexBound` |
+| Pipes | `define_forward_pipe` `define_enrich_pipe` `define_window_pipe` · `pipe(name)` → `describe` `pause` `resume` `drop` · `pipes()` · `PipeOperation` `WindowAggregation` `WindowTime` · durations are `datetime.timedelta` |
+| Catalog lifecycle | `create_*` `describe_*` `rename_*` `drop_*` `list_*` for Domain, Feed, Writer, Reader, Subscription, Role · `list_grants` · `open_writer_session` `seek_reader` |
+| Observability | `demand_feeds` `demand_readers` `demand_subscriptions` `demand_indexes` `demand_pipes` → `DemandReport`/`DemandRow` · `hot_keys()` → `HotKey` |
+| Escape hatches | `wcl(script)` · `commands([...])` raw command batch · `WriterSessionClient` `ReaderSessionClient` `SubscriptionMemberClient` byte-level sessions · `FeedClient` raw feed ops |
+| Errors | `WhitewaterError` — `Refused` `StaleSession` `AmbiguousResult` `Conflict` `Unavailable` `LeaseConflict` · `.code` carries the wire `code` |
+| Testing | `FakeRiverbed` — in-process loopback Riverbed implementing the wire contract (dedup, epochs, at-least-once reads, stores, WCL/commands, schemas) |
+
 ## Test
 
 
