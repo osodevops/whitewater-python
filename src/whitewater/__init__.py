@@ -27,6 +27,8 @@ from .feed import (
 )
 from .domain import (
     Domain,
+    FeedSchema,
+    SchemaDecl,
     ReaderBuilder,
     WriterBuilder,
 )
@@ -90,6 +92,8 @@ __all__ = [
     "ControlExecution",
     "Cursor",
     "Domain",
+    "FeedSchema",
+    "SchemaDecl",
     "Extractor",
     "FakeRiverbed",
     "Feed",

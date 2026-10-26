@@ -111,6 +111,30 @@ first catalog accessor issues ONE batched control read (`describe
 domain` + every `show` listing) and caches the snapshot — `refresh()`
 re-pulls.
 
+### Record schemas
+
+Records stay schema-neutral bytes on the wire; a Feed can still declare
+schema metadata the catalog tracks for tooling, validation, and
+compatibility. The Domain's schema is the default every Feed inherits;
+a Feed's own declaration overrides the named sides:
+
+```python
+from whitewater import FeedSchema, SchemaDecl
+
+client.set_domain_schema("shop", FeedSchema(value=SchemaDecl("json", subject="order-v1")))
+client.set_feed_schema("shop.orders", FeedSchema(key=SchemaDecl("text")))
+
+shop.schema()                            # the Domain default
+shop.feed_schema("shop.orders")          # effective: key=text, value=json/order-v1
+shop.declared_feed_schema("shop.orders") # the Feed's own sides only
+client.clear_feed_schema("shop.orders")  # reverts to inheritance
+```
+
+`SET SCHEMA ON DOMAIN|FEED <name> (KEY|VALUE <format> [SUBJECT 'x']
+[DEFINITION 'y'])+` in WCL does the same; `SHOW SCHEMAS` lists declared
+assignments. Formats today: `text`, `json`, `protobuf`, `avro`,
+`custom.<name>` — compatibility enforcement is still a no-op.
+
 ### Permanent consumers — the Kafka loop without the plumbing
 
 `feed.consumer(name)` binds the durable named Reader (the

@@ -44,6 +44,73 @@ K = TypeVar("K")
 V = TypeVar("V")
 
 
+class SchemaDecl:
+    """One side of a Feed's schema metadata — format plus optional
+    subject/definition text. Formats: ``text``, ``json``, ``protobuf``,
+    ``avro``, ``custom.<name>``. Records stay schema-neutral bytes on
+    the wire; declarations are catalog metadata for tooling and
+    compatibility — not yet an enforced registry."""
+
+    __slots__ = ("format", "subject", "definition")
+
+    def __init__(self, format: str, subject: Optional[str] = None,
+                 definition: Optional[str] = None):
+        self.format = format
+        self.subject = subject
+        self.definition = definition
+
+    def wire(self) -> Dict[str, Any]:
+        out: Dict[str, Any] = {"format": self.format}
+        if self.subject is not None:
+            out["subject"] = self.subject
+        if self.definition is not None:
+            out["definition"] = self.definition
+        return out
+
+    @staticmethod
+    def _from(row) -> Optional["SchemaDecl"]:
+        if not isinstance(row, dict):
+            return None
+        return SchemaDecl(row.get("format"), row.get("subject"),
+                          row.get("definition"))
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"SchemaDecl(format={self.format!r}, subject={self.subject!r})"
+
+
+class FeedSchema:
+    """The declared key/value schema pair — either side may be None.
+    A Feed's declaration overrides the named sides of its Domain's
+    default."""
+
+    __slots__ = ("key", "value")
+
+    def __init__(self, key: Optional[SchemaDecl] = None,
+                 value: Optional[SchemaDecl] = None):
+        self.key = key
+        self.value = value
+
+    def wire(self) -> Dict[str, Any]:
+        out: Dict[str, Any] = {}
+        if self.key is not None:
+            out["key"] = self.key.wire()
+        if self.value is not None:
+            out["value"] = self.value.wire()
+        return out
+
+    @staticmethod
+    def _from(row) -> Optional["FeedSchema"]:
+        if not isinstance(row, dict):
+            return None
+        key, value = SchemaDecl._from(row.get("key")), SchemaDecl._from(row.get("value"))
+        if key is None and value is None:
+            return None
+        return FeedSchema(key, value)
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"FeedSchema(key={self.key!r}, value={self.value!r})"
+
+
 class Domain:
     """A strongly-typed handle on one Domain — see module docs.
 
@@ -85,6 +152,22 @@ class Domain:
         return self._snap().describe.get("history_policy")
 
     # ---- scoped resources -------------------------------------------------
+
+    def schema(self) -> Optional[FeedSchema]:
+        """The Domain's declared schema default — None when undeclared.
+        Every Feed without its own declaration inherits it."""
+        return FeedSchema._from(self._snap().describe.get("schema"))
+
+    def feed_schema(self, feed: str) -> Optional[FeedSchema]:
+        """The effective schema for a Feed — its declared sides layered
+        over the Domain default. None when nothing is declared anywhere
+        (schema-neutral bytes)."""
+        return self._snap().feed_schemas.get(feed)
+
+    def declared_feed_schema(self, feed: str) -> Optional[FeedSchema]:
+        """Only the sides the Feed itself declares — None when it
+        inherits the Domain default wholesale."""
+        return self._snap().declared_schemas.get(feed)
 
     def feeds(self, prefix: Optional[str] = None) -> List["Feed[str, bytes]"]:
         """Every Feed in this Domain as typed :class:`Feed` handles,
@@ -208,10 +291,14 @@ class Domain:
 
         feeds: List[str] = []
         feed_ids = set()
+        feed_schemas: Dict[str, Optional[FeedSchema]] = {}
+        declared_schemas: Dict[str, Optional[FeedSchema]] = {}
         for row in results[1].data or []:
             if row.get("space_id") == domain_id:
                 feeds.append(row["name"])
                 feed_ids.add(row["feed_id"])
+                feed_schemas[row["name"]] = FeedSchema._from(row.get("effective_schema"))
+                declared_schemas[row["name"]] = FeedSchema._from(row.get("schema"))
         feeds.sort()
 
         def scoped(index: int, field: str, ids) -> List[str]:
@@ -228,6 +315,8 @@ class Domain:
             describe=describe,
             revision=execution.revision,
             feeds=feeds,
+            feed_schemas=feed_schemas,
+            declared_schemas=declared_schemas,
             readers=scoped(2, "feed_id", feed_ids),
             writers=scoped(3, "feed_id", feed_ids),
             subscriptions=scoped(4, "space_id", {domain_id}),
@@ -243,6 +332,8 @@ class _Snapshot:
         "describe",
         "revision",
         "feeds",
+        "feed_schemas",
+        "declared_schemas",
         "readers",
         "writers",
         "subscriptions",

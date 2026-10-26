@@ -569,6 +569,37 @@ class WhitewaterClient:
         """``CREATE FEED <dotted.name>``"""
         return self.wcl("CREATE FEED " + _dotted(name))
 
+    def set_domain_schema(self, domain: str, schema) -> ControlExecution:
+        """``SET SCHEMA ON DOMAIN <name>`` — the Domain's inherited default."""
+        return self._set_schema("domain", domain, schema)
+
+    def set_feed_schema(self, feed: str, schema) -> ControlExecution:
+        """``SET SCHEMA ON FEED <feed>`` — overrides the named sides."""
+        return self._set_schema("feed", feed, schema)
+
+    def clear_domain_schema(self, domain: str) -> ControlExecution:
+        """``DROP SCHEMA ON DOMAIN <name>``"""
+        return self._clear_schema("domain", domain)
+
+    def clear_feed_schema(self, feed: str) -> ControlExecution:
+        """``DROP SCHEMA ON FEED <feed>`` — reverts to Domain inheritance."""
+        return self._clear_schema("feed", feed)
+
+    def _set_schema(self, kind: str, name: str, schema) -> ControlExecution:
+        if schema is None:
+            raise Refused(400, "schema.required", "schema is required")
+        return self.commands([{
+            "command": "set_schema",
+            "scope": {"kind": kind, "name": _dotted(name)},
+            "schema": schema.wire(),
+        }])
+
+    def _clear_schema(self, kind: str, name: str) -> ControlExecution:
+        return self.commands([{
+            "command": "clear_schema",
+            "scope": {"kind": kind, "name": _dotted(name)},
+        }])
+
     def create_writer(self, name_or_domain, feed=None):
         """``CREATE WRITER <name> TO <feed>`` — or, when the first
         argument is a :class:`Domain`, a fluent

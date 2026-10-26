@@ -251,6 +251,7 @@ class _Riverbed:
         self.revision = 0
         self.domains: Dict[str, _NamedResource] = {}
         self.feeds: Dict[str, _FeedState] = {}
+        self.schemas: Dict[str, dict] = {}
         self.writers: Dict[str, _WriterState] = {}
         self.readers: Dict[str, _ReaderState] = {}
         self.subscriptions: Dict[str, _SubscriptionState] = {}
@@ -964,10 +965,10 @@ class _Riverbed:
     def _resource_row(self, table: str, item: Any) -> dict:
         """The catalog row SHOW/DESCRIBE surfaces for one resource."""
         if table == "domains":
-            return {"name": item.name, "space_id": item.resource_id, "domain_id": item.resource_id, "status": "active", "created_at_ns": item.created_at_ns}
+            return {"name": item.name, "space_id": item.resource_id, "domain_id": item.resource_id, "status": "active", "created_at_ns": item.created_at_ns, "schema": self.schemas.get("domain:" + item.name)}
         if table == "feeds":
             domain = self.domains.get(item.domain)
-            return {"name": item.name, "feed_id": item.feed_id, "space_id": domain.resource_id if domain else None, "domain": item.domain, "status": "active", "created_at_ns": item.created_at_ns}
+            return {"name": item.name, "feed_id": item.feed_id, "space_id": domain.resource_id if domain else None, "domain": item.domain, "status": "active", "created_at_ns": item.created_at_ns, "schema": self.schemas.get("feed:" + item.name), "effective_schema": self._effective_schema(item.name)}
         if table == "writers":
             feed = self.feeds.get(item.feed)
             return {"name": item.name, "writer_id": item.writer_id, "feed": item.feed, "feed_id": feed.feed_id if feed else None, "status": "active", "created_at_ns": item.created_at_ns, "session_epoch": item.session_epoch, "session_active": item.session_active, "next_sequence": item.next_sequence}
@@ -992,6 +993,30 @@ class _Riverbed:
         if table == "indexes":
             return {"name": item.name, "index_id": item.index_id, "space_id": self._space_id_of(item.feed), "feed": item.feed, "fields": item.fields, "unique": item.unique, "stage": item.stage, "status": "active", "created_at_ns": item.created_at_ns}
         return {"name": item.name, "role_id": item.resource_id, "status": "active", "created_at_ns": item.created_at_ns}
+
+    def _effective_schema(self, feed_name: str) -> Optional[dict]:
+        """The feed's declared schema layered over its Domain's —
+        the feed's sides win; missing sides inherit."""
+        own = self.schemas.get("feed:" + feed_name)
+        domain_name = feed_name.split(".")[0]
+        inherited = self.schemas.get("domain:" + domain_name)
+        if own is None:
+            return inherited
+        if inherited is None:
+            return own
+        merged = dict(inherited)
+        merged.update(own)
+        return merged
+
+    def _set_schema(self, scope: dict, schema: dict) -> Tuple[str, str, dict]:
+        key = str(scope.get("kind")) + ":" + str(scope.get("name"))
+        self.schemas[key] = dict(schema)
+        return "SET SCHEMA", f"set schema on {scope.get('kind')} {scope.get('name')}", dict(schema)
+
+    def _clear_schema(self, scope: dict) -> Tuple[str, str, dict]:
+        key = str(scope.get("kind")) + ":" + str(scope.get("name"))
+        self.schemas.pop(key, None)
+        return "DROP SCHEMA", f"dropped schema on {scope.get('kind')} {scope.get('name')}", {}
 
     def _table(self, kind: str) -> Tuple[str, dict]:
         table = self._RESOURCE_TABLES.get(str(kind).lower())
@@ -1147,6 +1172,13 @@ class _Riverbed:
 
     def _show(self, kind: str) -> Tuple[str, str, dict]:
         normalized = str(kind).lower()
+        if normalized == "schemas":
+            rows = [
+                {"scope_kind": key.split(":", 1)[0], "name": key.split(":", 1)[1],
+                 "schema": dict(schema)}
+                for key, schema in self.schemas.items()
+            ]
+            return "SHOW SCHEMAS", "showing schemas", rows
         if normalized in ("grants", "api_keys", "storage_nodes"):
             return "SHOW", f"showing {kind}", []
         table_name = self._SHOW_TABLES.get(normalized)
@@ -1383,6 +1415,23 @@ class _Riverbed:
             if kw(3) != "TO":
                 raise _Refusal(400, "WCL syntax error: RENAME expects TO <name>")
             return self._rename(tokens[1], tokens[2], tokens[4])
+        if kw(0) == "SET" and kw(1) == "SCHEMA" and kw(2) == "ON":
+            # SET SCHEMA ON DOMAIN|FEED <name> (KEY|VALUE <fmt> [SUBJECT 's'] [DEFINITION 'd'])+
+            scope = {"kind": (kw(3) or "").lower(), "name": tokens[4]}
+            schema = dict(self.schemas.get(scope["kind"] + ":" + scope["name"], {}))
+            index = 5
+            while index + 1 < len(tokens) and kw(index) in ("KEY", "VALUE"):
+                side = kw(index).lower()
+                decl = {"format": tokens[index + 1].lower()}
+                index += 2
+                while index < len(tokens) and kw(index) in ("SUBJECT", "DEFINITION") and index + 1 < len(tokens):
+                    decl[kw(index).lower()] = tokens[index + 1].strip("'").replace("''", "'")
+                    index += 2
+                schema[side] = decl
+            return self._set_schema(scope, schema)
+        if kw(0) == "DROP" and kw(1) == "SCHEMA" and kw(2) == "ON":
+            return self._clear_schema(
+                {"kind": (kw(3) or "").lower(), "name": tokens[4]})
         if kw(0) == "DROP":
             return self._drop(tokens[1], tokens[2])
         if kw(0) == "SHOW":
@@ -1488,6 +1537,10 @@ class _Riverbed:
                 raise _Refusal(400, f"resource not found: Writer {name}")
             writer.session_active = False
             return "REVOKE WRITER SESSION", f"revoked Writer session {name}", self._resource_row("writers", writer)
+        if kind == "set_schema":
+            return self._set_schema(command.get("scope") or {}, command.get("schema") or {})
+        if kind == "clear_schema":
+            return self._clear_schema(command.get("scope") or {})
         if kind == "create_domain" or kind == "create_space":
             name = str(command.get("name"))
             self._create_named(self.domains, name)

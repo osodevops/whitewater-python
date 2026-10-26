@@ -12,6 +12,8 @@ from whitewater import (
     ReaderStart,
     Refused,
     WhitewaterClient,
+    FeedSchema,
+    SchemaDecl,
 )
 
 
@@ -199,3 +201,74 @@ class TestReaderStart:
 
         with pytest.raises(ValueError):
             ReaderStart.timestamp(datetime.datetime(2024, 1, 1))
+
+
+def test_feed_schema_layers_feed_over_domain(client):
+    client.wcl("""
+        CREATE DOMAIN shop;
+        CREATE FEED shop.orders;
+        CREATE FEED shop.returns;
+    """)
+    client.set_domain_schema(
+        "shop", FeedSchema(value=SchemaDecl("json", subject="order-v1")))
+    client.set_feed_schema(
+        "shop.orders", FeedSchema(key=SchemaDecl("text")))
+
+    shop = client.get_domain("shop")
+    assert shop.schema().value.format == "json"
+    assert shop.schema().value.subject == "order-v1"
+
+    effective = shop.feed_schema("shop.orders")
+    assert effective.key.format == "text"
+    assert effective.value.format == "json"          # inherited
+    declared = shop.declared_feed_schema("shop.orders")
+    assert declared.key.format == "text"
+    assert declared.value is None
+
+    inherited = shop.feed_schema("shop.returns")
+    assert inherited.value.format == "json"
+    assert inherited.key is None
+    assert shop.declared_feed_schema("shop.returns") is None
+
+
+def test_clear_feed_schema_reverts_to_inheritance(client):
+    client.wcl("CREATE DOMAIN shop; CREATE FEED shop.orders;")
+    client.set_domain_schema("shop", FeedSchema(value=SchemaDecl("json")))
+    client.set_feed_schema("shop.orders", FeedSchema(value=SchemaDecl("avro")))
+
+    shop = client.get_domain("shop")
+    assert shop.feed_schema("shop.orders").value.format == "avro"
+
+    client.clear_feed_schema("shop.orders")
+    shop.refresh()
+    assert shop.feed_schema("shop.orders").value.format == "json"
+    assert shop.declared_feed_schema("shop.orders") is None
+
+
+def test_set_schema_via_wcl_and_show_schemas(client):
+    client.wcl("""
+        CREATE DOMAIN shop;
+        CREATE FEED shop.orders;
+        SET SCHEMA ON DOMAIN shop VALUE json SUBJECT 'order-v1';
+        SET SCHEMA ON FEED shop.orders KEY protobuf DEFINITION 'syntax = "proto3"';
+    """)
+    rows = client.wcl("SHOW SCHEMAS").results[0].data
+    by_scope = {(r["scope_kind"], r["name"]): r["schema"] for r in rows}
+    assert by_scope[("domain", "shop")]["value"]["subject"] == "order-v1"
+    assert by_scope[("feed", "shop.orders")]["key"]["format"] == "protobuf"
+
+    shop = client.get_domain("shop")
+    effective = shop.feed_schema("shop.orders")
+    assert effective.key.format == "protobuf"
+    assert effective.value.format == "json"
+
+
+def test_schema_wcl_via_typed_commands_matches(client):
+    client.wcl("CREATE DOMAIN shop; CREATE FEED shop.orders;")
+    client.set_feed_schema("shop.orders",
+                           FeedSchema(value=SchemaDecl("custom.msgpack")))
+    described = client.commands(
+        [{"command": "describe", "kind": "feed", "name": "shop.orders"}]
+    ).results[0].data
+    assert described["schema"]["value"]["format"] == "custom.msgpack"
+    assert described["effective_schema"]["value"]["format"] == "custom.msgpack"
