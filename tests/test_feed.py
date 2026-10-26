@@ -190,10 +190,15 @@ def last_body(state, path):
     raise AssertionError(f"no request to {path}")
 
 
-def test_default_binding_is_utf8_keys_and_raw_payloads(stub, client):
+def test_default_binding_is_utf8_keys_and_payloads(stub, client):
     feed = client.feed("orders.events")
     assert feed.name == "orders.events"
     assert feed.key_codec.decode(b"k") == "k"
+    assert feed.value_codec.decode(b"v") == "v"
+
+
+def test_bytes_payloads_bind_through_an_explicit_codec(stub, client):
+    feed = client.feed("orders.events", value_type=bytes)
     assert feed.value_codec.decode(b"v") == b"v"
 
 

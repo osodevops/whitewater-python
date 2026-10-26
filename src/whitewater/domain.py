@@ -17,7 +17,7 @@ of composing dotted names by hand::
               .reader_id("fulfillment")          # the Kafka groupId analogue
               .reader_start_point(ReaderStart.BEGINNING)
               .max_page_size(256)
-              .open())                          # FeedReader[str, bytes]
+              .open())                          # FeedReader[str, str]
 
 The first catalog accessor issues ONE batched control read
 (``describe domain`` + every ``show`` listing), joins rows by
@@ -169,7 +169,7 @@ class Domain:
         inherits the Domain default wholesale."""
         return self._snap().declared_schemas.get(feed)
 
-    def feeds(self, prefix: Optional[str] = None) -> List["Feed[str, bytes]"]:
+    def feeds(self, prefix: Optional[str] = None) -> List["Feed[str, str]"]:
         """Every Feed in this Domain as typed :class:`Feed` handles,
         sorted by name. ``prefix`` filters on the relative name
         (``shop.orders`` → ``orders``)."""
@@ -237,7 +237,7 @@ class Domain:
         value_codec = value_codec or (
             _codecs.for_type(value_type)
             if value_type is not None
-            else _codecs.raw()
+            else _codecs.utf8()
         )
         return Feed(self._client, self._resolve(relative), key_codec, value_codec)
 

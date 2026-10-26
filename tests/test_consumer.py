@@ -153,7 +153,7 @@ def test_consumer_run_delivers_each_record_and_acks_the_page(stub):
     consumer.close()
     thread.join(5)
 
-    assert [m.value for m in seen] == [b"alpha", b"beta"]
+    assert [m.value for m in seen] == ["alpha", "beta"]
     assert [m.cursor for m in seen] == ["c1", "c2"]
     acks = calls(state, "/v1/readers/ack")
     assert len(acks) == 1 and acks[0]["cursor"] == "c2"
@@ -175,7 +175,7 @@ def test_consumer_iterates_records_and_break_closes_cleanly(stub):
         if len(seen) == 2:
             break
 
-    assert seen == [b"alpha", b"beta"]
+    assert seen == ["alpha", "beta"]
     assert len(calls(state, "/v1/readers/ack")) == 2
     assert calls(state, "/v1/readers/close")
     assert not consumer.is_running
@@ -229,7 +229,7 @@ def test_stale_session_reopens_and_resumes(stub):
     consumer.close()
     thread.join(5)
 
-    assert [m.value for m in seen] == [b"alpha"]
+    assert [m.value for m in seen] == ["alpha"]
     assert state["opens"] >= 2
 
 

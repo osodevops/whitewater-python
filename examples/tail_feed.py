@@ -26,7 +26,7 @@ client.create_domain("demo")
 client.create_feed("demo.tail")
 
 # UTF-8 binding: appended text comes back as text on every fetch.
-tail = client.feed("demo.tail", value_type=str)
+tail = client.feed("demo.tail")
 
 after = None  # None -> feed tail position
 

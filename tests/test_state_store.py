@@ -203,7 +203,7 @@ def test_put_get_get_by_delete_carry_wire_shapes(stub):
 
     result = store.put(
         "user-1",
-        b"profile-1",
+        "profile-1",
         named={"passport": "P111", "department": "eng", "score": 42},
     )
     assert result.sequence == 3 and not result.deduplicated
@@ -216,7 +216,7 @@ def test_put_get_get_by_delete_carry_wire_shapes(stub):
     assert named["score"] == [{"kind": "i64", "value": 42}]
 
     found = store.get("user-1", strict=True, wait_ms=250)
-    assert found is not None and found.payload == b"profile-1"
+    assert found is not None and found.payload == "profile-1"
     assert found.freshness.applied_seq == 7 and not found.freshness.behind
     lookup = bodies(state, "/v1/state-stores/lookup")[0]
     assert lookup["strict"] is True and lookup["wait_ms"] == 250
@@ -228,7 +228,7 @@ def test_put_get_get_by_delete_carry_wire_shapes(stub):
     assert get_by["named_key"] == "department"
     assert get_by["values"] == [{"kind": "text", "value": "eng"}]
 
-    deleted = store.delete(b"user-1")
+    deleted = store.delete("user-1")
     assert deleted.sequence == 3
     op = bodies(state, "/v1/state-stores/mutate")[1]["op"]
     assert op["kind"] == "delete_row"

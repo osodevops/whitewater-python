@@ -852,9 +852,11 @@ class WhitewaterClient:
         """A typed facade over the node-side StateStore ``name`` — rows
         live on the Nodes (RF3 + Fjall); this client holds no state.
 
-        The default binding takes ``str`` keys and ``bytes`` payloads;
-        pass ``value_type``/``value_codec`` (and optionally ``key_type``/
-        ``key_codec``) so the SDK serializes for you::
+        The default binding takes ``str`` keys and ``str`` payloads
+        (UTF-8) — plain JSON flows with no codec ceremony; raw binary
+        opts in via ``value_type=bytes``/``value_codec=codecs.raw()``.
+        Pass ``value_type``/``value_codec`` (and optionally ``key_type``/
+        ``key_codec``) for other shapes::
 
             store = client.state_store("app.users", value_type=User)
             store.put("u1", User("matt", "eng"))
@@ -864,7 +866,7 @@ class WhitewaterClient:
             codecs.for_type(key_type) if key_type is not None else codecs.utf8()
         )
         value_codec = value_codec or (
-            codecs.for_type(value_type) if value_type is not None else codecs.raw()
+            codecs.for_type(value_type) if value_type is not None else codecs.utf8()
         )
         return StateStore(self._transport, name, key_codec, value_codec)
 
@@ -886,15 +888,17 @@ class WhitewaterClient:
             with orders.reader("audit", max_page_size=64) as reader:
                 order = reader.fetch().records[0].value        # decoded
 
-        Default binding: ``str`` keys + ``bytes`` payloads. Codecs are
-        shared with :meth:`state_store` — ``codecs.utf8()``,
+        Default binding: ``str`` keys + ``str`` payloads (UTF-8) —
+        un-schema-backed JSON flows with zero codec ceremony; raw
+        binary opts in via ``value_type=bytes``/``value_codec=codecs.raw()``.
+        Codecs are shared with :meth:`state_store` — ``codecs.utf8()``,
         ``codecs.raw()``, ``codecs.json_of(T)``, ``codecs.of(enc, dec)``.
         """
         key_codec = key_codec or (
             codecs.for_type(key_type) if key_type is not None else codecs.utf8()
         )
         value_codec = value_codec or (
-            codecs.for_type(value_type) if value_type is not None else codecs.raw()
+            codecs.for_type(value_type) if value_type is not None else codecs.utf8()
         )
         return Feed(self, _dotted(name), key_codec, value_codec)
 
@@ -1114,7 +1118,7 @@ class StateStore:
         self.name = _dotted(name)
         self._named_keys: List[NamedKey] = []
         self._key_codec = key_codec or codecs.utf8()
-        self._value_codec = value_codec or codecs.raw()
+        self._value_codec = value_codec or codecs.utf8()
 
     @staticmethod
     def named(name: str) -> "StateStore":

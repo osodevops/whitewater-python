@@ -25,12 +25,12 @@ shop.create_feed("orders.dlq")            # dead-letter feed
 
 # ---- produce (usually a different service) --------------------------
 # Bind codecs on the Feed handle — the SDK serializes, never b"...".
-orders = shop.feed("orders", value_type=str)          # JSON text payloads
+orders = shop.feed("orders")                          # str payloads — UTF-8 default
 writer = shop.create_writer(orders).writer_id("orders.ingest").open()
 writer.append("order-1", '{"total":42}')
 
 # ---- consume ---------------------------------------------------------
-dlq = shop.feed("orders.dlq", value_type=str)
+dlq = shop.feed("orders.dlq")
 dead_letter = shop.create_writer(dlq).writer_id("fulfillment.dlq").open()
 reader = (shop.create_reader(orders)
           .reader_id("fulfillment")          # durable id — survives restarts
