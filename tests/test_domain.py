@@ -216,6 +216,62 @@ def test_create_feed_scopes_inside_the_domain(client):
     assert domain.feed("x.y").name == "shop.x.y"
 
 
+def test_domain_hanging_builders_compose_and_open(client):
+    """shop.create_writer/create_reader resolve relative names — the
+    service shape hangs entirely off the Domain."""
+    client.create_domain("shop")
+    shop = client.get_domain("shop")
+    shop.create_feed("orders")
+
+    writer = shop.create_writer("orders").writer_id("ingest").open()
+    writer.append("order-1", b"1")
+
+    reader = (shop.create_reader("orders")
+              .reader_id("fulfillment")
+              .reader_start_point(ReaderStart.BEGINNING)
+              .open())
+    assert reader.fetch().records[0].key == "order-1"
+    reader.close()
+
+
+def test_reader_for_each_acks_handled_pages(client):
+    client.create_feed("shop.orders")
+    shop = client.domain("shop")
+    writer = shop.create_writer("orders").writer_id("w").open()
+    writer.append("a", b"1")
+    writer.append("b", b"2")
+
+    reader = (shop.create_reader("orders")
+              .reader_id("pump")
+              .reader_start_point(ReaderStart.BEGINNING)
+              .capacity(1)
+              .open())
+    seen = []
+    reader.for_each(lambda m: seen.append(m.key) or len(seen) < 2)
+    assert seen == ["a", "b"]
+    assert reader.acknowledged_cursor is not None   # page 1 committed
+    reader.close()
+
+    # The unacked tail replays on the next open.
+    again = shop.create_reader("orders").reader_id("pump").open()
+    assert again.fetch().records[0].key == "b"
+    again.close()
+
+
+def test_reader_iterates_records_per_page(client):
+    client.create_feed("shop.orders")
+    shop = client.domain("shop")
+    shop.create_writer("orders").writer_id("w").open().append("a", b"1")
+    reader = (shop.create_reader("orders")
+              .reader_id("iter")
+              .reader_start_point(ReaderStart.BEGINNING)
+              .open())
+    for message in reader:
+        assert message.key == "a"
+        break                       # page unacked → replays later
+    reader.close()
+
+
 def test_feed_schema_layers_feed_over_domain(client):
     client.wcl("""
         CREATE DOMAIN shop;

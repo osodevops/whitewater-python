@@ -120,13 +120,13 @@ overload is detected by type, so the legacy `create_reader(name, feed,
 start)` string form is unchanged:
 
 ```python
-reader = (client.create_reader(shop, shop.feed("orders"))
+reader = (shop.create_reader("orders")               # = client.create_reader(shop, …)
           .reader_id("fulfillment")                    # required — durable id
           .reader_start_point(ReaderStart.BEGINNING)   # or .END, .cursor(c), .timestamp(dt)
           .capacity(256)
           .open())                                     # FeedReader — decoded messages
 
-writer = (client.create_writer(shop, "orders")         # str names are relative
+writer = (shop.create_writer("orders")                 # str names are relative
           .writer_id("orders.ingest")
           .open())                                     # FeedWriter
 ```
@@ -138,6 +138,11 @@ Builder semantics:
   Reader resumes its acknowledged frontier.
 - `.declare()` provisions without opening a session (fails when the
   name is taken); `.open()` declares-when-missing then opens.
+- `reader.for_each(handler)` delivers records one at a time and acks
+  each fetched page after its records are handled; a `False` return —
+  or an exception — leaves the in-flight page unacked so its tail
+  replays. `for m in reader:` iterates with the same ack-per-page
+  semantics; the pump paces empty fetches on `retry_after_ms`.
 - A `Feed` object bound to another Domain fails locally — before any
   network call. String names are always relative to the Domain.
 

@@ -253,6 +253,25 @@ class Domain:
         """
         return self._client.create_feed(self._resolve(relative))
 
+    def create_reader(self, feed):
+        """Fluent Reader declaration on ``feed`` inside this Domain —
+        ``shop.create_reader("orders")`` binds ``shop.orders``::
+
+            reader = (shop.create_reader("orders")
+                      .reader_id("fulfillment")      # Kafka groupId analogue
+                      .reader_start_point(ReaderStart.BEGINNING)
+                      .open())
+
+        Accepts a relative name or a :class:`Feed` handle.
+        """
+        return self._client.create_reader(self, feed)
+
+    def create_writer(self, feed):
+        """Fluent Writer declaration on ``feed`` inside this Domain —
+        ``shop.create_writer("orders")`` binds ``shop.orders``. Accepts
+        a relative name or a :class:`Feed` handle."""
+        return self._client.create_writer(self, feed)
+
 
     def _resolve(self, relative: str) -> str:
         if relative is None:

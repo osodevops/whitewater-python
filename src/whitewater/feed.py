@@ -294,6 +294,42 @@ class FeedReader(Generic[K, V]):
         self._closed = True
         self._session = self._session_client.close(self._session)
 
+    def for_each(self, handler: Callable[["FeedMessage[K, V]"], Optional[bool]]) -> None:
+        """Deliver every record to ``handler`` — one at a time —
+        acking each fetched page after its records are handled. The
+        pump paces empty fetches on the server's ``retry_after_ms`` and
+        exits when the reader is closed (call :meth:`close` from
+        another thread). ``handler`` returning ``False`` — or raising —
+        leaves the in-flight page unacked so its tail replays:
+        at-least-once delivery, never acknowledge undelivered records.
+        """
+        while not self._closed:
+            page = self.fetch()
+            if not page.records:
+                time.sleep(max(1, page.retry_after_ms) / 1000.0)
+                continue
+            for message in page.records:
+                if handler(message) is False:
+                    return
+            if self._closed:
+                return
+            self.ack()
+
+    def __iter__(self):
+        """Iterate records one at a time — ``for msg in reader:`` —
+        acking each page after its records are consumed. ``break`` (or
+        closing the reader) leaves the in-flight page unacked so its
+        tail replays on the next open."""
+        while not self._closed:
+            page = self.fetch()
+            if not page.records:
+                time.sleep(max(1, page.retry_after_ms) / 1000.0)
+                continue
+            yield from page.records
+            if self._closed:
+                return
+            self.ack()
+
     def __enter__(self) -> "FeedReader[K, V]":
         return self
 

@@ -89,19 +89,21 @@ shop.describe(); shop.history_policy
 
 orders = shop.feed("orders", value_type=Order)   # typed Feed handle
 
-writer = (client.create_writer(shop, orders)
+# Everything a service needs hangs off the Domain — relative names
+# resolve inside it:
+writer = (shop.create_writer("orders")
           .writer_id("orders.ingest")
           .open())
 writer.append("order-1", Order("order-1", 42))
 
-with (client.create_reader(shop, orders)
+with (shop.create_reader("orders")
       .reader_id("fulfillment")                    # durable id — the Kafka groupId analogue
       .reader_start_point(ReaderStart.BEGINNING)   # first-declare only
       .capacity(256)
       .open()) as reader:
-    for record in reader.fetch().records:
-        handle(record.value)
-    reader.ack()
+    reader.for_each(lambda m: handle(m.value))     # per-record pump: deliver → ack each page
+    # or iterate: `for m in reader:` — same ack-per-page semantics
+    # or stay manual: fetch() → handle records → ack()
 ```
 
 `reader_id` is durable application state: `reader_start_point` applies
@@ -377,7 +379,7 @@ classes are the explicit escape hatches for the same wire contract.
 | Area | API |
 |---|---|
 | Client & transport | `WhitewaterClient(api_key, endpoints, timeout)` · `healthy()` · `use_compression` on feeds/writers · `close()` |
-| Typed Domains | `domain(name)` lazy / `get_domain(name)` eager · `name` `domain_id` `revision` `describe()` `history_policy` `refresh()` · `feeds(prefix)` `feed_names()` `readers()` `writers()` `subscriptions()` `pipes()` `indexes()` `state_stores()` · `feed(relative, codecs/types)` `get_feed` · `create_feed(relative)` |
+| Typed Domains | `domain(name)` lazy / `get_domain(name)` eager · `name` `domain_id` `revision` `describe()` `history_policy` `refresh()` · `feeds(prefix)` `feed_names()` `readers()` `writers()` `subscriptions()` `pipes()` `indexes()` `state_stores()` · `feed(relative, codecs/types)` `get_feed` · `create_feed` `create_reader` `create_writer` (relative/Feed) |
 | Schemas | `set_domain_schema` `set_feed_schema` `clear_domain_schema` `clear_feed_schema` · `Domain.schema()` `feed_schema()` `declared_feed_schema()` · `SchemaDecl`/`FeedSchema` — `json`, `jsonschema`, `avro`, `protobuf`, `text`, `bytes`, `custom.<name>` |
 | Feeds | `feed(name, key_codec=, value_codec=)` → `Feed` · `use_compression` · `records()` `fetch()` `load()` · `writer` `append` `reader` `subscribe` `consumer` `view` `view_types` |
 | Writing | `FeedWriter.append(key, value)` `append_event` `append_all` · `use_compression` `session_epoch` · idempotent `request_id` · `FeedEvent.with_request_id/.with_event_time_ns/.with_metadata/.text_metadata` |
