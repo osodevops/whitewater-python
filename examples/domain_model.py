@@ -3,7 +3,7 @@ composing dotted names by hand.
 
     shop = client.get_domain("shop")    # materialized catalog view
     orders = shop.feed("orders")        # typed Feed handle, zero I/O
-    reader = (client.create_reader(shop, orders)
+    reader = (shop.create_reader("orders")
               .reader_id("fulfillment")
               .reader_start_point(ReaderStart.BEGINNING)
               .open())
@@ -33,11 +33,15 @@ client = WhitewaterClient(
     ],
 )
 
-client.create_domain("shop")
-client.create_feed("shop.orders")
-client.create_feed("shop.returns")
+# create_domain returns the Domain handle — every resource lives under
+# it, so "shop.orders" can never be composed by hand or collide with
+# another team's namespace.
+shop = client.create_domain("shop")
+shop.create_feed("orders")
+shop.create_feed("returns")
 
-# get_domain() verifies + materializes now; domain() is the lazy handle.
+# get_domain() verifies + materializes the catalog now; domain() is the
+# lazy handle used above.
 shop = client.get_domain("shop")
 
 print("feeds:", shop.feed_names())
@@ -46,14 +50,14 @@ print("order-prefix feeds:", [f.name for f in shop.feeds("order")])
 orders = shop.feed("orders", value_type=Order)  # typed Feed, zero I/O
 
 writer = (
-    client.create_writer(shop, orders)
-    .writer_id("orders.ingest")
+    shop.create_writer("orders")
+    .writer_id("ingest")  # resolves to shop.ingest
     .open()
 )
 writer.append("order-1", Order("order-1", 42))
 
 with (
-    client.create_reader(shop, orders)
+    shop.create_reader("orders")
     .reader_id("fulfillment")  # durable id — the Kafka groupId analogue
     .reader_start_point(ReaderStart.BEGINNING)  # first-declare only
     .capacity(256)

@@ -16,10 +16,15 @@ from whitewater import (
     EnrichMiss,
     Extractor,
     PipeOperation,
+    Scoped,
     WhitewaterClient,
     WindowAggregation,
     WindowTime,
 )
+
+
+def ops(client):
+    return client.domain("ops")
 
 COMMANDS_OK = {
     "request_id": "00000000-0000-7000-8000-000000000006",
@@ -295,7 +300,8 @@ def test_window_operation_validates_lateness_models():
 
 def test_define_forward_pipe_emits_the_copy_pipe(client, stub):
     state, _url = stub
-    client.define_forward_pipe("ops.relay", "relay.sub", "ops.archive")
+    ops(client).define_forward_pipe(
+        "relay", Scoped.absolute("relay.sub"), "archive")
     assert commands(state) == [
         {
             "command": "define_pipe",
@@ -309,14 +315,14 @@ def test_define_forward_pipe_emits_the_copy_pipe(client, stub):
 
 def test_define_enrich_pipe_emits_feed_store_and_operation(client, stub):
     state, _url = stub
-    client.define_enrich_pipe(
-        "ops.enrich",
-        "enrich.sub",
-        "ops.enriched",
-        "ops.profiles",
+    ops(client).define_enrich_pipe(
+        "enrich",
+        Scoped.absolute("enrich.sub"),
+        "enriched",
+        "profiles",
         PipeOperation.enrich(
             Extractor.json("user_id"), on_miss=EnrichMiss.QUARANTINE),
-        quarantine_feed="ops.misses",
+        quarantine_feed="misses",
     )
     assert commands(state) == [
         {
@@ -339,8 +345,8 @@ def test_define_enrich_pipe_emits_feed_store_and_operation(client, stub):
 
 def test_define_enrich_pipe_omits_absent_quarantine(client, stub):
     state, _url = stub
-    client.define_enrich_pipe(
-        "ops.enrich", "enrich.sub", "ops.enriched", "ops.profiles",
+    ops(client).define_enrich_pipe(
+        "enrich", Scoped.absolute("enrich.sub"), "enriched", "profiles",
         PipeOperation.enrich(Extractor.record_key()),
     )
     command = commands(state)[0]
@@ -351,35 +357,35 @@ def test_define_enrich_pipe_omits_absent_quarantine(client, stub):
 def test_define_enrich_pipe_refuses_other_operations(client, stub):
     state, _url = stub
     with pytest.raises(ValueError):
-        client.define_enrich_pipe(
-            "ops.enrich", "sub", "ops.out", "ops.profiles",
+        ops(client).define_enrich_pipe(
+            "enrich", "sub", "out", "profiles",
             PipeOperation.window(timedelta(seconds=60),
                                  Extractor.record_key(),
                                  WindowAggregation.count()))
     with pytest.raises(ValueError):
-        client.define_enrich_pipe(
-            "ops.enrich", "sub", "ops.out", "ops.profiles",
+        ops(client).define_enrich_pipe(
+            "enrich", "sub", "out", "profiles",
             PipeOperation.forward())
     with pytest.raises(TypeError):
-        client.define_enrich_pipe(
-            "ops.enrich", "sub", "ops.out", "ops.profiles",
+        ops(client).define_enrich_pipe(
+            "enrich", "sub", "out", "profiles",
             {"operation": "enrich"})
     assert state["calls"] == []
 
 
 def test_define_window_pipe_emits_store_and_operation(client, stub):
     state, _url = stub
-    client.define_window_pipe(
-        "ops.rollups",
-        "window.sub",
-        "ops.minute.totals",
+    ops(client).define_window_pipe(
+        "rollups",
+        Scoped.absolute("window.sub"),
+        "minute.totals",
         PipeOperation.window(
             timedelta(minutes=1),
             Extractor.record_key(),
             WindowAggregation.sum(Extractor.json("amount")),
             max_late=timedelta(seconds=5),
         ),
-        emit_feed="ops.panes",
+        emit_feed="panes",
     )
     assert commands(state) == [
         {
@@ -406,8 +412,8 @@ def test_define_window_pipe_emits_store_and_operation(client, stub):
 
 def test_define_window_pipe_omits_absent_emit_feed(client, stub):
     state, _url = stub
-    client.define_window_pipe(
-        "ops.rollups", "window.sub", "ops.minute.totals",
+    ops(client).define_window_pipe(
+        "rollups", Scoped.absolute("window.sub"), "minute.totals",
         PipeOperation.window(timedelta(seconds=60),
                              Extractor.record_key(),
                              WindowAggregation.count()))
@@ -418,21 +424,21 @@ def test_define_window_pipe_omits_absent_emit_feed(client, stub):
 def test_define_window_pipe_refuses_other_operations(client, stub):
     state, _url = stub
     with pytest.raises(ValueError):
-        client.define_window_pipe(
-            "ops.rollups", "sub", "ops.store",
+        ops(client).define_window_pipe(
+            "rollups", "sub", "store",
             PipeOperation.enrich(Extractor.record_key()))
     with pytest.raises(TypeError):
-        client.define_window_pipe(
-            "ops.rollups", "sub", "ops.store", "window")
+        ops(client).define_window_pipe(
+            "rollups", "sub", "store", "window")
     assert state["calls"] == []
 
 
 def test_define_pipe_names_validate_before_any_call(client, stub):
     state, _url = stub
     with pytest.raises(ValueError):
-        client.define_forward_pipe("Bad Name", "sub", "ops.out")
+        ops(client).define_forward_pipe("Bad Name", "sub", "out")
     with pytest.raises(ValueError):
-        client.define_forward_pipe("ops.relay", "bad sub!", "ops.out")
+        ops(client).define_forward_pipe("relay", "bad sub!", "out")
     with pytest.raises(ValueError):
-        client.define_forward_pipe("ops.relay", "sub", "ops.Out")
+        ops(client).define_forward_pipe("relay", "sub", "ops.Out")
     assert state["calls"] == []

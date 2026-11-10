@@ -11,14 +11,17 @@ and replay, so there is no consumer code to run:
     Window   — accumulate records into fixed panes of a managed
                StateStore view
 
-Declaration is a control command, not a process::
+Declaration is a control command on the owning Domain, not a process::
 
-    client.define_forward_pipe("ops.relay", "relay.sub", "ops.archive")
+    ops.define_forward_pipe("relay", "relay.sub", "archive")
 
-then the Pipe lifecycle is operational::
+Every string resolves inside the declaring Domain; a ``Feed``/
+``SubscriptionRef`` handle or ``Scoped.absolute`` points an endpoint at
+another Domain (see cross_domain.py). The Pipe lifecycle is
+operational::
 
-    client.pipe("ops.enrich").pause()     # cooperative; frontier stays put
-    client.pipe("ops.enrich").resume()    # resumes the durable frontier
+    ops.pipe("enrich").pause()     # cooperative; frontier stays put
+    ops.pipe("enrich").resume()    # resumes the durable frontier
 
 Everything is named — Feeds, Stores, Subscriptions, Pipes. Partitions
 and Nodes never appear in the surface.
@@ -54,49 +57,49 @@ client = WhitewaterClient(
 # Each Pipe drives its own Subscription, so relay/enrich/window keep
 # independent durable frontiers over the same input.
 
-client.create_domain("ops")
-client.create_feed("ops.events")
-client.create_feed("ops.archive")     # forward output
-client.create_feed("ops.enriched")    # enrich output
-client.create_feed("ops.misses")      # enrich quarantine target
-client.create_feed("ops.panes")       # window emit feed
+ops = client.create_domain("ops")
+ops.create_feed("events")
+ops.create_feed("archive")     # forward output
+ops.create_feed("enriched")    # enrich output
+ops.create_feed("misses")      # enrich quarantine target
+ops.create_feed("panes")       # window emit feed
 
 # The enrich lookup store (manual) and the window pane view — a window
 # Pipe's output store must declare non-unique 'key' and 'pane' named
 # keys so pane rows stay enumerable without composite row keys.
-client.state_stores.define(client.state_store("ops.profiles"))
-client.state_stores.define(
-    client.state_store("ops.minute.totals").add_key("key").add_key("pane")
+ops.define_state_store(ops.state_store("profiles"))
+ops.define_state_store(
+    ops.state_store("minute.totals").add_key("key").add_key("pane")
 )
-client.create_subscription("relay.sub", "ops.events")
-client.create_subscription("enrich.sub", "ops.events")
-client.create_subscription("window.sub", "ops.events")
+ops.create_subscription("relay.sub", "events")
+ops.create_subscription("enrich.sub", "events")
+ops.create_subscription("window.sub", "events")
 
 # ---- declarations --------------------------------------------------------
 
 # Forward: archive every delivered record unchanged.
-client.define_forward_pipe("ops.relay", "relay.sub", "ops.archive")
+ops.define_forward_pipe("relay", "relay.sub", "archive")
 
 # Enrich: look up ops.profiles by the record's JSON "user_id"; misses go
 # to the quarantine feed instead of emitting unmatched output.
-client.define_enrich_pipe(
-    "ops.enrich",
+ops.define_enrich_pipe(
+    "enrich",
     "enrich.sub",
-    "ops.enriched",
-    "ops.profiles",
+    "enriched",
+    "profiles",
     PipeOperation.enrich(
         Extractor.json("user_id"),
         on_miss=EnrichMiss.QUARANTINE,
     ),
-    quarantine_feed="ops.misses",
+    quarantine_feed="misses",
 )
 
 # Window: sum "amount" per record Key into 60s event-time panes on
 # ops.minute.totals; panes close 5s late-bound and emit to ops.panes.
-client.define_window_pipe(
-    "ops.rollups",
+ops.define_window_pipe(
+    "rollups",
     "window.sub",
-    "ops.minute.totals",
+    "minute.totals",
     PipeOperation.window(
         timedelta(minutes=1),
         Extractor.record_key(),
@@ -105,19 +108,19 @@ client.define_window_pipe(
         max_late=timedelta(seconds=5),
         expire=timedelta(hours=1),
     ),
-    emit_feed="ops.panes",
+    emit_feed="panes",
 )
 
 # ---- lifecycle --------------------------------------------------------------
 # Described stage, pause, and resume are catalog operations — the drive
 # itself is never in this process.
 
-pipe = client.pipe("ops.enrich")
+pipe = ops.pipe("enrich")
 info = pipe.describe()
 print(f"{info.name}: stage={info.stage} status={info.status}")
 
 pipe.pause()    # in-flight effects finish; frontier holds
 pipe.resume()   # drives resume from the durable frontier
 
-for declared in client.pipes():
+for declared in ops.pipe_infos():
     print(f"{declared.name}: {declared.stage}")

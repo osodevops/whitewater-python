@@ -40,9 +40,13 @@ opaque `str` subclass — never parsed or ordered.
 ## Resource management — two doors, one room
 
 `client.wcl(script)` sends raw WCL to `POST /v1/admin/wcl`. The typed
-methods are thin builders over it —
-`client.create_feed("orders.events")` serializes
-`CREATE FEED orders.events` and calls `wcl` internally.
+builders on a `Domain` are thin serializers over it —
+`shop.create_feed("orders")` serializes `CREATE FEED shop.orders` and
+calls `wcl` internally. The app-facing route always goes through a
+Domain: `client` itself only manages Domains
+(`create_domain`/`domain`/`get_domain`) plus cluster-level calls, so a
+Feed, Writer, Reader, Subscription, Pipe, or StateStore can never be
+declared outside a business namespace.
 
 Two validators run before interpolation, raising `ValueError`
 locally:
@@ -68,9 +72,9 @@ Raw script — several statements commit as one request (one
 client.wcl("""
     CREATE DOMAIN shop;
     CREATE FEED shop.orders;
-    CREATE WRITER orders.writer TO shop.orders;
-    OPEN WRITER SESSION orders.writer;
-    CREATE READER audit FROM shop.orders START AT BEGINNING;
+    CREATE WRITER shop.writer TO shop.orders;
+    OPEN WRITER SESSION shop.writer;
+    CREATE READER shop.audit FROM shop.orders START AT BEGINNING;
     SHOW FEEDS;
 """)
 ```
@@ -79,20 +83,21 @@ The same calls through the typed builders — each serializes one WCL
 statement and calls `wcl` internally:
 
 ```python
-client.create_domain("shop")                       # CREATE DOMAIN shop;
-shop = client.get_domain("shop")                   # verifies + materializes
+shop = client.create_domain("shop")                # CREATE DOMAIN shop;
 shop.create_feed("orders")                         # CREATE FEED shop.orders;
-client.create_writer("orders.writer", "shop.orders")
-client.open_writer_session("orders.writer")        # epoch comes back in .data
-client.create_reader("audit", "shop.orders", ReaderStart.beginning())
-client.list_feeds()                                # SHOW FEEDS;
-client.seek_reader("audit", ReaderStart.now())     # SEEK READER ... TO NOW;
-client.drop_feed("shop.orders")                    # DROP FEED shop.orders;
+shop.create_writer("writer", "orders")             # CREATE WRITER shop.writer TO shop.orders;
+shop.open_writer_session("writer")                 # epoch comes back in .data
+shop.create_reader("audit", "orders", ReaderStart.beginning())
+shop.feed_names()                                  # SHOW FEEDS;, scoped
+shop.seek_reader("audit", ReaderStart.now())       # SEEK READER shop.audit ... TO NOW;
+shop.drop_feed("orders")                           # DROP FEED shop.orders;
 ```
 
-`client.create_feed("shop.orders")` with the fully-qualified name is
-the flat-name equivalent; `domain.create_feed("orders")` composes the
-Domain prefix for you.
+Names passed to a Domain method are relative — the Domain composes its
+prefix, so `shop.create_reader("audit", "orders")` produces
+`shop.audit` bound to `shop.orders`. Passing the qualified name anyway
+(`shop.create_feed("shop.orders")`) is idempotent: an argument already
+inside the Domain resolves to itself.
 
 ### Typed Domains — the friendly door
 
@@ -114,20 +119,20 @@ namespace instead of concatenating dotted names:
   `state_stores()`, `describe()`, `history_policy`, `domain_id`,
   `revision`.
 
-`client.create_reader(domain, feed)` / `create_writer(domain, feed)`
-return fluent builders instead of executing WCL directly — the Domain
-overload is detected by type, so the legacy `create_reader(name, feed,
-start)` string form is unchanged:
+`shop.create_reader(feed)` / `shop.create_writer(feed)` return fluent
+builders instead of executing WCL directly; the two-string form
+`shop.create_reader("audit", "orders")` is the raw `CREATE READER`
+statement:
 
 ```python
-reader = (shop.create_reader("orders")               # = client.create_reader(shop, …)
+reader = (shop.create_reader("orders")
           .reader_id("fulfillment")                    # required — durable id
           .reader_start_point(ReaderStart.BEGINNING)   # or .END, .cursor(c), .timestamp(dt)
           .max_page_size(256)
           .open())                                     # FeedReader — decoded messages
 
 writer = (shop.create_writer("orders")                 # str names are relative
-          .writer_id("orders.ingest")
+          .writer_id("ingest")                           # -> shop.ingest
           .open())                                     # FeedWriter
 ```
 
@@ -163,56 +168,59 @@ client.commands([{
 }])
 ```
 
-(`client.state_stores.define(spec)` posts exactly this body for you.)
+(`accounts.define_state_store(spec)` posts exactly this body for you,
+with the spec name resolved inside the Domain.)
 
 `DROP` is spelled in WCL for every resource including stores:
-`client.wcl("DROP STATESTORE accounts.employees")` ≡ `store.drop()`.
+`client.wcl("DROP STATESTORE accounts.employees")` ≡ `store.drop()` ≡
+`accounts.drop_state_store("employees")`.
 
 ## Reading
 
 Three shapes, in increasing durability:
 
-1. **`client.feeds.records(feed, limit, after)`** — one-shot
-   committed history.
-2. **`client.feeds.temporary_fetch(feed, options)`** — anonymous
-   ephemeral reader; `tail` + `wait_ms` is a server-side long-poll
-   returning early when records arrive. Continue with `next_cursor`,
-   never the last record's cursor.
-3. **`client.reader(name)`** — durable independent cursor:
+1. **`shop.feed("orders").records(limit, after)`** (or
+   `shop.feed_ops().records(...)`) — one-shot committed history.
+2. **`shop.feed("orders").fetch(options)`** — anonymous ephemeral
+   reader; `tail` + `wait_ms` is a server-side long-poll returning
+   early when records arrive. Continue with `next_cursor`, never the
+   last record's cursor.
+3. **`shop.reader("audit")`** — durable independent cursor:
    `open` → `fetch` → `ack(delivered_cursor)` → `close`. Progress
    survives restarts.
 
 Two managed wrappers sit on top of those primitives:
 
-- **`feeds.load(feed, start, sink)`** — one-shot bulk read: pages
-  `temporary_fetch` from `ReaderStart` until the frontier is drained;
+- **`shop.feed("orders").load(start, sink)`** — one-shot bulk read:
+  pages `fetch` from `ReaderStart` until the frontier is drained;
   `sink` is any `records -> None` callback.
-- **`client.state_store(name)` / `StateStore.named(name)`** — the thin
+- **`shop.state_store(name)` / `StateStore.named(name)`** — the thin
   facade over the node-side StateStore (durable, RF3, Fjall): declare
-  with `client.state_stores.define(spec)` after `add_key(name, unique=)`
+  with `shop.define_state_store(spec)` after `add_key(name, unique=)`
   (up to 10 named secondary keys), then `put(key, payload, named={...})`
   with typed values, `get(key, strict=)`, `get_by(named_key, value)`
   (non-unique — returns `StoreRows`), `delete`, `iterate`, `page`,
   `clear`, `drop`. The facade holds no rows; reads carry freshness
   evidence (`applied_seq`/`committed_seq`/`behind`/`served_by`).
-- **`client.subscribe(reader, feed, start, on_records[, on_error])`** —
+- **`shop.subscribe(reader, feed, start, on_records[, on_error])`** —
   a durable consume loop on a background thread: provisions the Reader
   when missing, then `open` → [`fetch` → `on_records` → `ack`] →
   `close`. Transient errors retry; `StaleSession` and hard refusals
   terminate via `on_error`/`sub.failure`. The non-daemon thread keeps
   the process alive until `sub.close()` (or the `with` block exits).
 
-`client.subscription_member(sub)` is the lease vocabulary for
-cooperating consumers: `join` → `claim`/`renew`/`release` → `fetch`
-→ `ack`.
+`shop.member_client(sub)` is the lease vocabulary for cooperating
+consumers: `join` → `claim`/`renew`/`release` → `fetch` → `ack`.
 
 ## Writing
 
-- **Named session**: `open_writer_session(name)` returns a
-  `session_epoch` in `results[0].data`; bind `client.writer(name,
+- **Named session**: `shop.open_writer_session("ingest")` returns a
+  `session_epoch` in `results[0].data`; bind `shop.writer("ingest",
   epoch)` and `append` with a stable `request_id` per logical write.
-- **Ad-hoc**: `client.feeds.append(feed, record)` — ephemeral writer
-  identity; same request-id dedup rule.
+  `shop.feed("orders").writer("ingest")` does the declare + open in one
+  step on the typed facade.
+- **Ad-hoc**: `shop.feed_ops().append(feed, record)` — ephemeral
+  writer identity; same request-id dedup rule.
 
 ## Testing
 

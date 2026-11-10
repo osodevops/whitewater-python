@@ -459,7 +459,7 @@ class Subscription:
     ) -> None:
         try:
             self._ensure_reader(client, reader_name, feed, start)
-            reader = client.reader(reader_name)
+            reader = client._reader(reader_name)
             session = self._open_with_retry(reader, capacity)
             if session is None:
                 return          # stopped while waiting to open
@@ -496,7 +496,7 @@ class Subscription:
     ) -> None:
         """Declare the Reader when missing; an existing Reader is reused."""
         try:
-            client.create_reader(reader_name, feed, start)
+            client._create_reader(reader_name, feed, start)
         except Refused as error:
             if "exists" not in str(error):
                 raise
@@ -527,8 +527,8 @@ class WhitewaterClient:
         timeout: float = 60.0,
     ):
         self._transport = Transport(endpoints, api_key, timeout)
-        self.feeds = FeedClient(self._transport)
-        self.state_stores = StateStoresClient(self._transport)
+        self._feeds = FeedClient(self._transport)
+        self._state_stores = StateStoresClient(self._transport)
 
     def wcl(self, script: str, request_id: Optional[uuid.UUID] = None) -> ControlExecution:
         """Execute a WCL script; identical ``request_id`` retries return the
@@ -561,11 +561,18 @@ class WhitewaterClient:
     # and executes it. Names are validated before interpolation, so a bad value
     # fails locally rather than reaching the Control Plane.
 
-    def create_domain(self, name: str) -> ControlExecution:
-        """``CREATE DOMAIN <name>``"""
-        return self.wcl("CREATE DOMAIN " + _dotted(name))
+    def create_domain(self, name: str) -> "Domain":
+        """``CREATE DOMAIN <name>`` — returns the :class:`Domain` handle:
+        the only way to work Feeds, Writers, Readers, Subscriptions,
+        Pipes, and Stores from this client.
 
-    def create_feed(self, name: str) -> ControlExecution:
+            shop = client.create_domain("shop")
+            shop.create_feed("orders")      # CREATE FEED shop.orders
+        """
+        self.wcl("CREATE DOMAIN " + _dotted(name))
+        return self.domain(name)
+
+    def _create_feed(self, name: str) -> ControlExecution:
         """``CREATE FEED <dotted.name>``"""
         return self.wcl("CREATE FEED " + _dotted(name))
 
@@ -573,7 +580,7 @@ class WhitewaterClient:
         """``SET SCHEMA ON DOMAIN <name>`` — the Domain's inherited default."""
         return self._set_schema("domain", domain, schema)
 
-    def set_feed_schema(self, feed: str, schema) -> ControlExecution:
+    def _set_feed_schema(self, feed: str, schema) -> ControlExecution:
         """``SET SCHEMA ON FEED <feed>`` — overrides the named sides."""
         return self._set_schema("feed", feed, schema)
 
@@ -581,7 +588,7 @@ class WhitewaterClient:
         """``DROP SCHEMA ON DOMAIN <name>``"""
         return self._clear_schema("domain", domain)
 
-    def clear_feed_schema(self, feed: str) -> ControlExecution:
+    def _clear_feed_schema(self, feed: str) -> ControlExecution:
         """``DROP SCHEMA ON FEED <feed>`` — reverts to Domain inheritance."""
         return self._clear_schema("feed", feed)
 
@@ -600,34 +607,19 @@ class WhitewaterClient:
             "scope": {"kind": kind, "name": _dotted(name)},
         }])
 
-    def create_writer(self, name_or_domain, feed=None):
-        """``CREATE WRITER <name> TO <feed>`` — or, when the first
-        argument is a :class:`Domain`, a fluent
-        :class:`WriterBuilder`: ``client.create_writer(domain, feed)
-        .writer_id("orders.ingest").open()``."""
-        from .domain import Domain, WriterBuilder, _as_feed
-
-        if isinstance(name_or_domain, Domain):
-            return WriterBuilder(self, name_or_domain, _as_feed(name_or_domain, feed))
+    def _create_writer(self, name: str, feed: str) -> ControlExecution:
+        """``CREATE WRITER <name> TO <feed>``"""
         return self.wcl(
-            f"CREATE WRITER {_resource(name_or_domain)} TO {_dotted(feed)}"
+            f"CREATE WRITER {_resource(name)} TO {_dotted(feed)}"
         )
 
-    def create_reader(
-        self, name_or_domain, feed=None, start: Optional["ReaderStart"] = None
-    ):
-        """``CREATE READER <name> FROM <feed> [START AT <start>]`` — BEGINNING
-        when ``start`` is omitted. When the first argument is a
-        :class:`Domain`, returns a fluent :class:`ReaderBuilder`:
-        ``client.create_reader(domain, feed).reader_id("audit")
-        .reader_start_point(ReaderStart.BEGINNING).open()``."""
-        from .domain import Domain, ReaderBuilder, _as_feed
-
-        if isinstance(name_or_domain, Domain):
-            builder = ReaderBuilder(self, name_or_domain, _as_feed(name_or_domain, feed))
-            return builder.reader_start_point(start) if start is not None else builder
+    def _create_reader(
+        self, name: str, feed: str, start: Optional["ReaderStart"] = None
+    ) -> ControlExecution:
+        """``CREATE READER <name> FROM <feed> [START AT <start>]`` —
+        BEGINNING when ``start`` is omitted."""
         return self._create_from(
-            "READER", name_or_domain, feed, start or ReaderStart.beginning()
+            "READER", name, feed, start or ReaderStart.beginning()
         )
 
     # ---- strongly-typed Domains ---------------------------------------------
@@ -635,7 +627,7 @@ class WhitewaterClient:
     # typed entry point:
     #
     #   shop = client.domain("shop")
-    #   reader = (client.create_reader(shop, shop.get_feed("orders"))
+    #   reader = (shop.create_reader("orders")
     #       .reader_id("fulfillment")
     #       .reader_start_point(ReaderStart.BEGINNING)
     #       .open())
@@ -652,7 +644,7 @@ class WhitewaterClient:
         Domain exists now."""
         return self.domain(name).refresh()
 
-    def create_subscription(
+    def _create_subscription(
         self, name: str, feed: str, start: Optional["ReaderStart"] = None
     ) -> ControlExecution:
         """``CREATE SUBSCRIPTION <name> FROM <feed> [START AT <start>]``"""
@@ -671,12 +663,12 @@ class WhitewaterClient:
         """``CREATE ROLE <name>``"""
         return self.wcl("CREATE ROLE " + _resource(name))
 
-    def open_writer_session(self, writer: str) -> ControlExecution:
+    def _open_writer_session(self, writer: str) -> ControlExecution:
         """``OPEN WRITER SESSION <name>``; the returned epoch feeds
         :meth:`writer`."""
         return self.wcl("OPEN WRITER SESSION " + _resource(writer))
 
-    def seek_reader(self, reader: str, start: "ReaderStart") -> ControlExecution:
+    def _seek_reader(self, reader: str, start: "ReaderStart") -> ControlExecution:
         """``SEEK READER <name> TO <start>`` — repositions a durable Reader."""
         return self.wcl(f"SEEK READER {_resource(reader)} TO {start.wcl}")
 
@@ -684,19 +676,19 @@ class WhitewaterClient:
         """``DESCRIBE DOMAIN <name>``"""
         return self._describe("DOMAIN", name, True)
 
-    def describe_feed(self, name: str) -> ControlExecution:
+    def _describe_feed(self, name: str) -> ControlExecution:
         """``DESCRIBE FEED <dotted.name>``"""
         return self._describe("FEED", name, True)
 
-    def describe_writer(self, name: str) -> ControlExecution:
+    def _describe_writer(self, name: str) -> ControlExecution:
         """``DESCRIBE WRITER <name>``"""
         return self._describe("WRITER", name, False)
 
-    def describe_reader(self, name: str) -> ControlExecution:
+    def _describe_reader(self, name: str) -> ControlExecution:
         """``DESCRIBE READER <name>``"""
         return self._describe("READER", name, False)
 
-    def describe_subscription(self, name: str) -> ControlExecution:
+    def _describe_subscription(self, name: str) -> ControlExecution:
         """``DESCRIBE SUBSCRIPTION <name>``"""
         return self._describe("SUBSCRIPTION", name, False)
 
@@ -708,19 +700,19 @@ class WhitewaterClient:
         """``RENAME DOMAIN <current> TO <renamed>``"""
         return self._rename("DOMAIN", current, renamed, True)
 
-    def rename_feed(self, current: str, renamed: str) -> ControlExecution:
+    def _rename_feed(self, current: str, renamed: str) -> ControlExecution:
         """``RENAME FEED <current> TO <renamed>``"""
         return self._rename("FEED", current, renamed, True)
 
-    def rename_writer(self, current: str, renamed: str) -> ControlExecution:
+    def _rename_writer(self, current: str, renamed: str) -> ControlExecution:
         """``RENAME WRITER <current> TO <renamed>``"""
         return self._rename("WRITER", current, renamed, False)
 
-    def rename_reader(self, current: str, renamed: str) -> ControlExecution:
+    def _rename_reader(self, current: str, renamed: str) -> ControlExecution:
         """``RENAME READER <current> TO <renamed>``"""
         return self._rename("READER", current, renamed, False)
 
-    def rename_subscription(self, current: str, renamed: str) -> ControlExecution:
+    def _rename_subscription(self, current: str, renamed: str) -> ControlExecution:
         """``RENAME SUBSCRIPTION <current> TO <renamed>``"""
         return self._rename("SUBSCRIPTION", current, renamed, False)
 
@@ -732,19 +724,19 @@ class WhitewaterClient:
         """``DROP DOMAIN <name>``"""
         return self._drop("DOMAIN", name, True)
 
-    def drop_feed(self, name: str) -> ControlExecution:
+    def _drop_feed(self, name: str) -> ControlExecution:
         """``DROP FEED <dotted.name>``"""
         return self._drop("FEED", name, True)
 
-    def drop_writer(self, name: str) -> ControlExecution:
+    def _drop_writer(self, name: str) -> ControlExecution:
         """``DROP WRITER <name>``"""
         return self._drop("WRITER", name, False)
 
-    def drop_reader(self, name: str) -> ControlExecution:
+    def _drop_reader(self, name: str) -> ControlExecution:
         """``DROP READER <name>``"""
         return self._drop("READER", name, False)
 
-    def drop_subscription(self, name: str) -> ControlExecution:
+    def _drop_subscription(self, name: str) -> ControlExecution:
         """``DROP SUBSCRIPTION <name>``"""
         return self._drop("SUBSCRIPTION", name, False)
 
@@ -756,19 +748,19 @@ class WhitewaterClient:
         """``SHOW DOMAINS`` — rows live in ``results[0].data``."""
         return self.wcl("SHOW DOMAINS")
 
-    def list_feeds(self) -> ControlExecution:
+    def _list_feeds(self) -> ControlExecution:
         """``SHOW FEEDS``"""
         return self.wcl("SHOW FEEDS")
 
-    def list_writers(self) -> ControlExecution:
+    def _list_writers(self) -> ControlExecution:
         """``SHOW WRITERS``"""
         return self.wcl("SHOW WRITERS")
 
-    def list_readers(self) -> ControlExecution:
+    def _list_readers(self) -> ControlExecution:
         """``SHOW READERS``"""
         return self.wcl("SHOW READERS")
 
-    def list_subscriptions(self) -> ControlExecution:
+    def _list_subscriptions(self) -> ControlExecution:
         """``SHOW SUBSCRIPTIONS``"""
         return self.wcl("SHOW SUBSCRIPTIONS")
 
@@ -797,18 +789,18 @@ class WhitewaterClient:
     def _name(name: str, dotted: bool) -> str:
         return _dotted(name) if dotted else _resource(name)
 
-    def writer(self, name: str, session_epoch: int) -> WriterSessionClient:
+    def _writer(self, name: str, session_epoch: int) -> WriterSessionClient:
         return WriterSessionClient(self._transport, name, session_epoch)
 
-    def reader(self, name: str) -> ReaderSessionClient:
+    def _reader(self, name: str) -> ReaderSessionClient:
         return ReaderSessionClient(self._transport, name)
 
-    def subscription_member(self, subscription: str) -> SubscriptionMemberClient:
+    def _subscription_member(self, subscription: str) -> SubscriptionMemberClient:
         return SubscriptionMemberClient(self._transport, subscription)
 
     _SUBSCRIBE_CAPACITY = 128
 
-    def subscribe(
+    def _subscribe(
         self,
         reader: str,
         feed: str,
@@ -826,7 +818,7 @@ class WhitewaterClient:
         ``close()`` (or a ``with`` block exits); terminal errors reach
         ``on_error`` and ``subscription.failure``::
 
-            with client.subscribe("hr-view", "hr.employees",
+            with client.domain("hr").subscribe("hr-view", "employees",
                                   ReaderStart.beginning(), handle_records) as sub:
                 time.sleep(...)             # or just keep working
         """
@@ -840,7 +832,7 @@ class WhitewaterClient:
             on_error,
         )
 
-    def state_store(
+    def _state_store(
         self,
         name: str,
         key_codec=None,
@@ -858,7 +850,7 @@ class WhitewaterClient:
         Pass ``value_type``/``value_codec`` (and optionally ``key_type``/
         ``key_codec``) for other shapes::
 
-            store = client.state_store("app.users", value_type=User)
+            store = client.domain("app").state_store("users", value_type=User)
             store.put("u1", User("matt", "eng"))
             user = store.get("u1").payload            # decoded — never .encode()
         """
@@ -870,7 +862,7 @@ class WhitewaterClient:
         )
         return StateStore(self._transport, name, key_codec, value_codec)
 
-    def feed(
+    def _feed(
         self,
         name: str,
         key_codec=None,
@@ -883,7 +875,7 @@ class WhitewaterClient:
         history on the Nodes. The bound codecs serialize on write and
         deserialize on read::
 
-            orders = client.feed("orders.events", value_type=Order)
+            orders = client.domain("orders").feed("events", value_type=Order)
             orders.writer("ingest").append("order-1", order)   # encoded
             with orders.reader("audit", max_page_size=64) as reader:
                 order = reader.fetch().records[0].value        # decoded
@@ -918,7 +910,7 @@ class WhitewaterClient:
     # Typed ``define_pipe`` builders over :meth:`commands`. Names validate
     # locally, so a bad value fails before reaching the Control Plane.
 
-    def define_forward_pipe(
+    def _define_forward_pipe(
         self, name: str, subscription: str, output_feed: str
     ) -> ControlExecution:
         """``DEFINE PIPE`` — the copy Pipe: every record ``subscription``
@@ -934,7 +926,7 @@ class WhitewaterClient:
             }
         ])
 
-    def define_enrich_pipe(
+    def _define_enrich_pipe(
         self,
         name: str,
         subscription: str,
@@ -964,7 +956,7 @@ class WhitewaterClient:
         command["operation"] = operation.to_wire()
         return self.commands([command])
 
-    def define_window_pipe(
+    def _define_window_pipe(
         self,
         name: str,
         subscription: str,
@@ -994,13 +986,13 @@ class WhitewaterClient:
 
     # ---- Pipe lifecycle ------------------------------------------------
 
-    def pipe(self, name: str) -> "Pipe":
+    def _pipe(self, name: str) -> "Pipe":
         """Bind a declared Pipe for lifecycle operations:
         ``describe``/``pause``/``resume``/``drop``."""
         from .operations import Pipe
         return Pipe(self, name)
 
-    def pipes(self) -> List["PipeInfo"]:
+    def _pipes(self) -> List["PipeInfo"]:
         """``SHOW PIPES``: the catalog of declared Pipes."""
         from .operations import decode_pipes
         execution = self.commands([{"command": "show", "kind": "pipes"}])
@@ -1010,7 +1002,7 @@ class WhitewaterClient:
 
     # ---- Index queries --------------------------------------------------
 
-    def query_index(
+    def _query_index(
         self,
         index: str,
         predicate: "IndexPredicate",
@@ -1085,10 +1077,10 @@ class StateStore:
     Fjall store on the Nodes is the only store; this object holds no
     rows. Declare it with named keys, then put/get/delete/iterate::
 
-        store = (client.state_store("accounts.employees")
+        store = (client.domain("accounts").state_store("employees")
                  .add_key("passport", unique=True)
                  .add_key("department"))
-        client.state_stores.define(store)
+        client.domain("accounts").define_state_store(store)
 
         store.put(b"user-1", b"profile-1",
                   named={"passport": "P111", "department": "eng"})
@@ -1096,7 +1088,7 @@ class StateStore:
         store.get_by("department", "eng").rows  # every matching row
         for row in store.iterate(): ...         # primary-key order pages
         store.clear()
-        client.state_stores.drop(store.name)
+        client.domain("accounts").drop_state_store("employees")
 
     ``add_key`` records declaration intent used by ``define()``; it does
     not mutate an already-declared store (named keys are declared at
@@ -1171,8 +1163,8 @@ class StateStore:
     def _bound(self) -> Transport:
         if self._transport is None:
             raise ValueError(
-                "unbound StateStore spec — pass it to client.state_stores.define() "
-                "or get a bound facade via client.state_store(name)"
+                "unbound StateStore spec — pass it to domain.define_state_store() "
+                "or get a bound facade via domain.state_store(name)"
             )
         return self._transport
 
@@ -1378,7 +1370,7 @@ def _bytes(value: Union[bytes, str]) -> bytes:
 class StateStoresClient:
     """Collection-level StateStore operations: declaration and drop. Row
     operations live on the bound :class:`StateStore` facade returned by
-    ``client.state_store(name)``."""
+    ``domain.state_store(name)``."""
 
     def __init__(self, transport: Transport):
         self._transport = transport

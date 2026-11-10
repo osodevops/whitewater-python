@@ -2,10 +2,10 @@
 carries raw bytes; a :class:`Codec` keeps that plumbing inside the SDK
 so application code works with its own types::
 
-    orders = client.feed("orders.events", value_codec=codecs.json_of(Order))
+    orders = client.domain("orders").feed("events", value_codec=codecs.json_of(Order))
     orders.writer("ingest").append("order-1", Order("order-1", 42))
 
-    row = client.state_store("app.users", value_codec=codecs.json_of(User)).get("u1")
+    row = client.domain("app").state_store("users", value_codec=codecs.json_of(User)).get("u1")
     user = row.payload                     # decoded — never .encode()/.decode()
 
 ``utf8()`` for text keys/payloads, ``raw()`` for binary, ``json_()`` for
@@ -167,7 +167,7 @@ def of(
 def for_type(type_: Type[T]) -> Codec[T]:
     """Codec by type: ``str`` is UTF-8, ``bytes`` is raw identity,
     ``dict``/``list``/``None`` are untyped JSON, and every other type is
-    JSON-mapped — so ``client.feed(name, value_type=Order)`` just works
+    JSON-mapped — so ``domain.feed(name, value_type=Order)`` just works
     without spelling ``json_of(...)``."""
     if type_ is None or type_ in (dict, list):
         return _JSON  # type: ignore[return-value]

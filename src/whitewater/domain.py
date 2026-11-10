@@ -13,7 +13,7 @@ of composing dotted names by hand::
     shop.feeds("order")                   # prefix-filtered Feed handles
     shop.readers(); shop.writers()
 
-    reader = (client.create_reader(shop, shop.get_feed("orders"))
+    reader = (shop.create_reader("orders")
               .reader_id("fulfillment")          # the Kafka groupId analogue
               .reader_start_point(ReaderStart.BEGINNING)
               .max_page_size(256)
@@ -161,13 +161,14 @@ class Domain:
     def feed_schema(self, feed: str) -> Optional[FeedSchema]:
         """The effective schema for a Feed — its declared sides layered
         over the Domain default. None when nothing is declared anywhere
-        (schema-neutral bytes)."""
-        return self._snap().feed_schemas.get(feed)
+        (schema-neutral bytes). Resolves ``feed`` inside this Domain."""
+        return self._snap().feed_schemas.get(self._resolve(feed))
 
     def declared_feed_schema(self, feed: str) -> Optional[FeedSchema]:
         """Only the sides the Feed itself declares — None when it
-        inherits the Domain default wholesale."""
-        return self._snap().declared_schemas.get(feed)
+        inherits the Domain default wholesale. Resolves ``feed`` inside
+        this Domain."""
+        return self._snap().declared_schemas.get(self._resolve(feed))
 
     def feeds(self, prefix: Optional[str] = None) -> List["Feed[str, str]"]:
         """Every Feed in this Domain as typed :class:`Feed` handles,
@@ -251,27 +252,275 @@ class Domain:
         :meth:`refresh` (or a lazy accessor's first load) surfaces it
         through :meth:`feeds`/:meth:`feed_names`.
         """
-        return self._client.create_feed(self._resolve(relative))
+        return self._client._create_feed(self._resolve(relative))
 
-    def create_reader(self, feed):
-        """Fluent Reader declaration on ``feed`` inside this Domain —
-        ``shop.create_reader("orders")`` binds ``shop.orders``::
+    def create_reader(self, name_or_feed, feed=None,
+                      start: Optional[ReaderStart] = None):
+        """``shop.create_reader("orders")`` returns a fluent
+        :class:`ReaderBuilder` bound to ``shop.orders``::
 
             reader = (shop.create_reader("orders")
                       .reader_id("fulfillment")      # Kafka groupId analogue
                       .reader_start_point(ReaderStart.BEGINNING)
                       .open())
 
-        Accepts a relative name or a :class:`Feed` handle.
+        ``shop.create_reader("audit", "orders")`` executes the raw
+        ``CREATE READER shop.audit FROM shop.orders`` statement instead —
+        the feed argument follows :func:`_scoped`, so a ``Feed`` handle
+        or ``Scoped.absolute`` binds a Reader across Domains.
         """
-        return self._client.create_reader(self, feed)
+        if feed is None:
+            return ReaderBuilder(self._client, self, _as_feed(self, name_or_feed))
+        return self._client._create_reader(
+            self._resolve(name_or_feed), _scoped(self, feed),
+            start or ReaderStart.beginning())
 
-    def create_writer(self, feed):
-        """Fluent Writer declaration on ``feed`` inside this Domain —
-        ``shop.create_writer("orders")`` binds ``shop.orders``. Accepts
-        a relative name or a :class:`Feed` handle."""
-        return self._client.create_writer(self, feed)
+    def create_writer(self, name_or_feed, feed=None):
+        """``shop.create_writer("orders")`` returns a fluent
+        :class:`WriterBuilder`; ``shop.create_writer("ingest", "orders")``
+        executes ``CREATE WRITER shop.ingest TO shop.orders``. The feed
+        argument follows :func:`_scoped` like :meth:`create_reader`."""
+        if feed is None:
+            return WriterBuilder(self._client, self, _as_feed(self, name_or_feed))
+        return self._client._create_writer(
+            self._resolve(name_or_feed), _scoped(self, feed))
 
+    def create_subscription(
+        self, name: str, feed: str, start: Optional[ReaderStart] = None
+    ) -> ControlExecution:
+        """``CREATE SUBSCRIPTION <name> FROM <feed>`` — the feed follows
+        :func:`_scoped`: relative in-domain, a handle or
+        ``Scoped.absolute`` across Domains."""
+        return self._client._create_subscription(
+            self._resolve(name), _scoped(self, feed),
+            start or ReaderStart.beginning())
+
+    # ---- session-bound resources -------------------------------------------
+
+    def writer(self, name: str, session_epoch: int) -> "WriterSessionClient":
+        """The raw writer-session client bound to ``name`` inside this
+        Domain (epoch from :meth:`open_writer_session`)."""
+        return self._client._writer(self._resolve(name), session_epoch)
+
+    def writer_session(self, name: str, session_epoch: int) -> "WriterSessionClient":
+        """Alias of :meth:`writer`."""
+        return self.writer(name, session_epoch)
+
+    def reader(self, name: str) -> "ReaderSessionClient":
+        """The raw reader-session client bound to ``name`` inside this
+        Domain — ``open``/``fetch``/``ack``/``close`` with explicit
+        session state."""
+        return self._client._reader(self._resolve(name))
+
+    def reader_session(self, name: str) -> "ReaderSessionClient":
+        """Alias of :meth:`reader`."""
+        return self.reader(name)
+
+    def member_client(self, subscription: str) -> "SubscriptionMemberClient":
+        """The raw subscription-member client bound to ``subscription``
+        inside this Domain — explicit member/lease epoch plumbing."""
+        return self._client._subscription_member(self._resolve(subscription))
+
+    def subscription(self, relative: str) -> "SubscriptionRef":
+        """A :class:`SubscriptionRef` handle naming a Subscription inside
+        this Domain — pure name composition, no I/O."""
+        return SubscriptionRef(self._client, self._resolve(relative))
+
+    def subscribe(
+        self,
+        reader: str,
+        feed: str,
+        start: ReaderStart,
+        on_records,
+        on_error=None,
+        max_page_size: Optional[int] = None,
+    ) -> "Subscription":
+        """Managed durable consume inside this Domain: ensures the Reader
+        exists, runs open → fetch → deliver → ack on a background thread."""
+        return self._client._subscribe(
+            self._resolve(reader), _scoped(self, feed), start,
+            on_records, on_error, max_page_size)
+
+    def open_writer_session(self, writer: str) -> ControlExecution:
+        """``OPEN WRITER SESSION <writer>`` inside this Domain."""
+        return self._client._open_writer_session(self._resolve(writer))
+
+    def seek_reader(self, reader: str, start: "ReaderStart") -> ControlExecution:
+        """``SEEK READER <reader> TO <start>`` inside this Domain."""
+        return self._client._seek_reader(self._resolve(reader), start)
+
+    # ---- catalog lifecycle --------------------------------------------------
+
+    def describe_feed(self, relative: str) -> ControlExecution:
+        """``DESCRIBE FEED <feed>`` inside this Domain."""
+        return self._client._describe_feed(self._resolve(relative))
+
+    def describe_writer(self, relative: str) -> ControlExecution:
+        """``DESCRIBE WRITER <writer>`` inside this Domain."""
+        return self._client._describe_writer(self._resolve(relative))
+
+    def describe_reader(self, relative: str) -> ControlExecution:
+        """``DESCRIBE READER <reader>`` inside this Domain."""
+        return self._client._describe_reader(self._resolve(relative))
+
+    def describe_subscription(self, relative: str) -> ControlExecution:
+        """``DESCRIBE SUBSCRIPTION <subscription>`` inside this Domain."""
+        return self._client._describe_subscription(self._resolve(relative))
+
+    def rename_feed(self, current: str, renamed: str) -> ControlExecution:
+        """``RENAME FEED`` — both names resolve inside this Domain."""
+        return self._client._rename_feed(
+            self._resolve(current), self._resolve(renamed))
+
+    def rename_writer(self, current: str, renamed: str) -> ControlExecution:
+        """``RENAME WRITER`` — both names resolve inside this Domain."""
+        return self._client._rename_writer(
+            self._resolve(current), self._resolve(renamed))
+
+    def rename_reader(self, current: str, renamed: str) -> ControlExecution:
+        """``RENAME READER`` — both names resolve inside this Domain."""
+        return self._client._rename_reader(
+            self._resolve(current), self._resolve(renamed))
+
+    def rename_subscription(self, current: str, renamed: str) -> ControlExecution:
+        """``RENAME SUBSCRIPTION`` — both names resolve inside this Domain."""
+        return self._client._rename_subscription(
+            self._resolve(current), self._resolve(renamed))
+
+    def drop_feed(self, relative: str) -> ControlExecution:
+        """``DROP FEED <feed>`` inside this Domain."""
+        return self._client._drop_feed(self._resolve(relative))
+
+    def drop_writer(self, relative: str) -> ControlExecution:
+        """``DROP WRITER <writer>`` inside this Domain."""
+        return self._client._drop_writer(self._resolve(relative))
+
+    def drop_reader(self, relative: str) -> ControlExecution:
+        """``DROP READER <reader>`` inside this Domain."""
+        return self._client._drop_reader(self._resolve(relative))
+
+    def drop_subscription(self, relative: str) -> ControlExecution:
+        """``DROP SUBSCRIPTION <subscription>`` inside this Domain."""
+        return self._client._drop_subscription(self._resolve(relative))
+
+    # ---- schemas --------------------------------------------------------------
+
+    def set_schema(self, schema) -> ControlExecution:
+        """``SET SCHEMA ON DOMAIN <domain>`` — the inherited default."""
+        return self._client.set_domain_schema(self._name, schema)
+
+    def clear_schema(self) -> ControlExecution:
+        """``DROP SCHEMA ON DOMAIN <domain>``."""
+        return self._client.clear_domain_schema(self._name)
+
+    def set_feed_schema(self, relative: str, schema) -> ControlExecution:
+        """``SET SCHEMA ON FEED <feed>`` inside this Domain."""
+        return self._client._set_feed_schema(self._resolve(relative), schema)
+
+    def clear_feed_schema(self, relative: str) -> ControlExecution:
+        """``DROP SCHEMA ON FEED <feed>`` inside this Domain."""
+        return self._client._clear_feed_schema(self._resolve(relative))
+
+    # ---- pipes ------------------------------------------------------------------
+
+    def pipe(self, relative: str) -> "Pipe":
+        """A declared Pipe's lifecycle handle — ``describe``/``pause``/
+        ``resume``/``drop`` — inside this Domain."""
+        return self._client._pipe(self._resolve(relative))
+
+    def pipe_infos(self) -> List["PipeInfo"]:
+        """``SHOW PIPES`` rows scoped to this Domain."""
+        prefix = self._name + "."
+        return [info for info in self._client._pipes()
+                if info.name.startswith(prefix)]
+
+    def define_forward_pipe(
+        self, name: str, subscription, output_feed
+    ) -> ControlExecution:
+        """``DEFINE PIPE <name> FROM <subscription> TO FEED <feed>`` —
+        strings resolve inside this Domain; a ``Feed``/
+        ``SubscriptionRef`` handle or :meth:`Scoped.absolute` points the
+        endpoint across Domains."""
+        return self._client._define_forward_pipe(
+            self._resolve(name), _scoped(self, subscription),
+            _scoped(self, output_feed))
+
+    def define_enrich_pipe(
+        self, name: str, subscription, output_feed, store,
+        operation, quarantine_feed=None,
+    ) -> ControlExecution:
+        """``DEFINE PIPE ... ENRICH FROM <store>`` — every endpoint
+        follows :func:`_scoped`: strings in-domain, handles/absolute
+        cross-Domain."""
+        return self._client._define_enrich_pipe(
+            self._resolve(name), _scoped(self, subscription),
+            _scoped(self, output_feed), _scoped(self, store), operation,
+            _scoped(self, quarantine_feed) if quarantine_feed is not None else None)
+
+    def define_window_pipe(
+        self, name: str, subscription, output_store, operation,
+        emit_feed=None,
+    ) -> ControlExecution:
+        """``DEFINE PIPE ... TO STATESTORE <store>`` — every endpoint
+        follows :func:`_scoped`."""
+        return self._client._define_window_pipe(
+            self._resolve(name), _scoped(self, subscription),
+            _scoped(self, output_store), operation,
+            _scoped(self, emit_feed) if emit_feed is not None else None)
+
+    # ---- state stores -----------------------------------------------------------
+
+    def state_store(self, relative: str, key_codec=None, value_codec=None,
+                    *, key_type=None, value_type=None) -> "StateStore":
+        """A typed ``StateStore`` facade inside this Domain —
+        ``shop.state_store("customers")`` binds ``shop.customers``."""
+        return self._client._state_store(
+            self._resolve(relative), key_codec, value_codec,
+            key_type=key_type, value_type=value_type)
+
+    def define_state_store(self, spec, source=None) -> "StateStore":
+        """Declare ``spec`` inside this Domain — the spec's name
+        resolves in-domain. ``source`` names the Feed the store
+        materializes from (None = manual); a ``Feed`` handle or
+        :meth:`Scoped.absolute` sources it across Domains. Returns the
+        bound store facade."""
+        # Rebind the spec's name into this Domain without touching keys.
+        from .client import StateStore as _SS
+        scoped_spec = _SS.named(self._resolve(spec.name))
+        for key in spec.named_keys:
+            scoped_spec.add_key(key.name, key.unique, key.extractor)
+        return self._client._state_stores.define(
+            scoped_spec,
+            _scoped(self, source) if source is not None else None)
+
+    def drop_state_store(self, relative: str) -> ControlExecution:
+        """``DROP STATESTORE <name>`` inside this Domain."""
+        return self._client._state_stores.drop(self._resolve(relative))
+
+    # ---- indexes -----------------------------------------------------------------
+
+    def query_index(self, relative: str, predicate, limit: Optional[int] = None,
+                    strict: bool = False, wait_ms: Optional[int] = None) -> "IndexPage":
+        """Query the replicated Index ``relative`` inside this Domain."""
+        return self._client._query_index(
+            self._resolve(relative), predicate, limit, strict, wait_ms)
+
+    @property
+    def feed_ops(self) -> "FeedClient":
+        """The raw byte-level feed client — committed records, temporary
+        fetches, ad-hoc appends by absolute name. The escape hatch under
+        the Domain door; prefer bound :class:`Feed` handles."""
+        return self._client._feeds
+
+    def scoped(self, relative: str) -> "Scoped":
+        """A :class:`Scoped` reference naming a resource inside this
+        Domain — pass to Pipe definitions to make resolution explicit."""
+        return Scoped.relative(relative)
+
+    def resolve(self, relative: str) -> str:
+        """The full wire name of ``relative`` inside this Domain —
+        ``shop.resolve("orders.hourly")`` → ``shop.orders.hourly``."""
+        return self._resolve(relative)
 
     def _resolve(self, relative: str) -> str:
         if relative is None:
@@ -377,7 +626,7 @@ class _Snapshot:
 
 class ReaderBuilder(Generic[K, V]):
     """Fluent declaration + session-open of a durable named Reader —
-    returned by ``client.create_reader(domain, feed)``.
+    returned by ``domain.create_reader(feed)``.
 
     ``reader_id`` is required: it is the durable consume identity (the
     Kafka ``groupId`` analogue). ``reader_start_point`` applies only
@@ -416,7 +665,8 @@ class ReaderBuilder(Generic[K, V]):
     def declare(self) -> ControlExecution:
         """Declare the Reader in the catalog without opening a session —
         fails when the name is already declared."""
-        return self._client.create_reader(self._require_id(), self._feed.name, self._start)
+        return self._client._create_reader(
+            self._require_id(), self._feed.name, self._start)
 
     def open(self) -> "FeedReader[K, V]":
         """Declare the Reader when missing (an existing declaration keeps
@@ -424,7 +674,7 @@ class ReaderBuilder(Generic[K, V]):
         Feed's codecs — ``fetch`` returns decoded ``FeedMessage``s."""
         reader_id = self._require_id()
         self._feed._ensure_reader(reader_id, self._start)
-        session_client = self._client.reader(reader_id)
+        session_client = self._client._reader(reader_id)
         session = session_client.open(self._max_page_size)
         return FeedReader(
             session_client, session, self._feed.key_codec, self._feed.value_codec
@@ -436,12 +686,14 @@ class ReaderBuilder(Generic[K, V]):
                 "reader_id(...) is required — the durable consume identity"
                 " (the Kafka groupId analogue)"
             )
-        return self._reader_id
+        # Reader identities are Domain resources — "fulfillment" inside
+        # "shop" declares shop.fulfillment, never a global name.
+        return self._domain._resolve(self._reader_id)
 
 
 class WriterBuilder(Generic[K, V]):
     """Fluent declaration + session-open of a durable named Writer —
-    returned by ``client.create_writer(domain, feed)``."""
+    returned by ``domain.create_writer(feed)``."""
 
     def __init__(self, client: "WhitewaterClient", domain: Domain, feed: "Feed[K, V]"):
         self._client = client
@@ -457,7 +709,8 @@ class WriterBuilder(Generic[K, V]):
     def declare(self) -> ControlExecution:
         """Declare the Writer in the catalog without opening a session —
         fails when the name is already declared."""
-        return self._client.create_writer(self._require_id(), self._feed.name)
+        return self._client._create_writer(
+            self._require_id(), self._feed.name)
 
     def open(self) -> "FeedWriter[K, V]":
         """Declare the Writer when missing, open a session (the fencing
@@ -465,13 +718,13 @@ class WriterBuilder(Generic[K, V]):
         writer_id = self._require_id()
         self._feed._ensure_writer(writer_id)
         session_epoch = self._feed._open_writer_session(writer_id)
-        session = self._client.writer(writer_id, session_epoch)
+        session = self._client._writer(writer_id, session_epoch)
         return FeedWriter(session, self._feed.key_codec, self._feed.value_codec)
 
     def _require_id(self) -> str:
         if self._writer_id is None:
             raise ValueError("writer_id(...) is required")
-        return self._writer_id
+        return self._domain._resolve(self._writer_id)
 
 
 def _as_feed(domain: Domain, feed) -> "Feed":
@@ -483,3 +736,68 @@ def _as_feed(domain: Domain, feed) -> "Feed":
             f"feed '{bound.name}' is outside Domain '{domain.name}'"
         )
     return bound
+
+
+class Scoped:
+    """An explicit reference to a resource that may live outside the
+    declaring Domain — the Pipe-endpoint argument type.
+
+    ``Scoped.relative("orders.sub")`` resolves inside the Domain (same as
+    a plain string); ``Scoped.absolute("warehouse.inbound")`` carries a
+    fully-qualified cross-Domain name verbatim. ``Feed``,
+    ``StateStore``, and :class:`SubscriptionRef` handles count as
+    absolute references — they carry their full dotted name.
+    """
+
+    __slots__ = ("_name", "_absolute")
+
+    def __init__(self, name: str, absolute: bool):
+        self._name = name
+        self._absolute = absolute
+
+    @staticmethod
+    def relative(name: str) -> "Scoped":
+        """Resolve ``name`` inside the declaring Domain."""
+        return Scoped(name, False)
+
+    @staticmethod
+    def absolute(name: str) -> "Scoped":
+        """Carry the fully-qualified ``name`` verbatim — cross-Domain."""
+        return Scoped(name, True)
+
+    def resolve(self, domain: "Domain") -> str:
+        return _dotted(self._name) if self._absolute else domain._resolve(self._name)
+
+
+class SubscriptionRef:
+    """A handle naming a Subscription — the pipe-endpoint reference that
+    carries an absolute name; also exposes the raw member client."""
+
+    __slots__ = ("_client", "_name")
+
+    def __init__(self, client: "WhitewaterClient", name: str):
+        self._client = client
+        self._name = name
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    def member_client(self) -> "SubscriptionMemberClient":
+        """The raw member client — explicit member/lease epoch plumbing."""
+        return self._client._subscription_member(self._name)
+
+
+def _scoped(domain: Domain, arg) -> str:
+    """Resolve a Pipe endpoint: ``str``/``Scoped.relative`` inside the
+    Domain; ``Scoped.absolute``/a ``name``-carrying handle verbatim."""
+    if isinstance(arg, Scoped):
+        return arg.resolve(domain)
+    if isinstance(arg, str):
+        return domain._resolve(arg)
+    name = getattr(arg, "name", None)
+    if isinstance(name, str) and name:
+        return name
+    raise TypeError(
+        "a Pipe endpoint is a name (resolves in-domain), a "
+        "Feed/StateStore/SubscriptionRef handle, or Scoped.absolute")

@@ -60,15 +60,19 @@ client = WhitewaterClient(
 
 | `client` (direct) | WCL + typed command execution (`/v1/admin/wcl`, `/v1/admin/commands`), node health â€” plus typed resource methods (`create_domain`, `create_feed`, `create_writer`, `create_reader`, `create_subscription`, `describe_feed`, `rename_feed`, `drop_feed`, `list_feeds`, `seek_reader`, `open_writer_session`, â€¦) that build the same WCL for you. `ReaderStart` (`beginning()`, `now()`, `cursor(c)`, `timestamp_ns(ns)`) supplies `START AT` positions |
 
-| `client.domain(name)` / `client.get_domain(name)` | **Strongly-typed Domain facade**: `domain()` is a lazy handle (free name composition, no I/O); `get_domain()` verifies the Domain exists and materializes its catalog view in one batched read — `domain.feeds("order")`, `feed_names()`, `readers()`, `writers()`, `subscriptions()`, `pipes()`, `indexes()`, `state_stores()`, `describe()`, `history_policy`, `refresh()`. `domain.feed("orders")` binds a typed `Feed` under the Domain's prefix; `domain.create_feed("orders")` declares it |
+| `client.domain(name)` / `client.get_domain(name)` / `client.create_domain(name)` | **The Domain is the front door** — `create_domain()` returns the handle too. `domain()` is lazy (free name composition, no I/O); `get_domain()` verifies the Domain exists and materializes its catalog view in one batched read — `feeds("order")`, `feed_names()`, `readers()`, `writers()`, `subscriptions()`, `pipes()`, `indexes()`, `state_stores()`, `describe()`, `history_policy`, `refresh()`. Every resource resolves inside the Domain: `domain.feed("orders")` binds `orders` under the Domain's prefix; `domain.create_feed("orders")` declares it; `create_writer`/`create_reader`/`create_subscription`/`pipe`/`state_store`/`define_*_pipe`/`query_index`/`drop_*`/`rename_*`/`seek_reader`/`open_writer_session` all follow the same rule |
 
-| `client.writer(name, epoch)` | Idempotent single and batch appends (`request_id` dedup) |
+| `domain.writer(name, epoch)` | Idempotent single and batch appends (`request_id` dedup) |
 
-| `client.reader(name)` | Named-Reader sessions: open / fetch / ack / close / resume |
+| `domain.reader(name)` | Named-Reader sessions: open / fetch / ack / close / resume |
 
-| `client.subscription_member(sub)` | Join, claim, renew, fetch, ack, release under fenced leases |
+| `domain.member_client(sub)` | Join, claim, renew, fetch, ack, release under fenced leases |
 
-| `client.feed(name[, value_type/value_codec])` | **Typed feed facade**: binds `codecs` once so keys/payloads serialize automatically in both directions â€” `feed.writer(name)` (declares + opens a session), `feed.reader(name, max_page_size)` (decoded `fetch`/`ack`, context-managed), `feed.fetch`/`records`/`load` (decoded ad-hoc reads), `feed.subscribe` (decoded batches). Same codec vocabulary as `state_store`: `str`/`bytes`/JSON dataclasses out of the box, protobuf/msgpack/custom via `codecs.of` |
+| `domain.feed(name[, value_type/value_codec])` | **Typed feed facade**: binds `codecs` once so keys/payloads serialize automatically in both directions — `feed.writer(name)` (declares + opens a session), `feed.reader(name, max_page_size)` (decoded `fetch`/`ack`, context-managed), `feed.fetch`/`records`/`load` (decoded ad-hoc reads), `feed.subscribe` (decoded batches), `feed.consumer(name)` (supervised loop). Same codec vocabulary as `state_store`: `str`/`bytes`/JSON dataclasses out of the box, protobuf/msgpack/custom via `codecs.of` |
+
+
+
+
 See [docs/stores.md](docs/stores.md) for the full store guide.
 
 ### Typed Domains — navigate, don't concatenate
@@ -127,13 +131,14 @@ a Feed's own declaration overrides the named sides:
 ```python
 from whitewater import FeedSchema, SchemaDecl
 
+shop = client.domain("shop")
 client.set_domain_schema("shop", FeedSchema(value=SchemaDecl("json", subject="order-v1")))
-client.set_feed_schema("shop.orders", FeedSchema(key=SchemaDecl("text")))
+shop.set_feed_schema("orders", FeedSchema(key=SchemaDecl("text")))
 
 shop.schema()                            # the Domain default
-shop.feed_schema("shop.orders")          # effective: key=text, value=json/order-v1
-shop.declared_feed_schema("shop.orders") # the Feed's own sides only
-client.clear_feed_schema("shop.orders")  # reverts to inheritance
+shop.feed_schema("orders")               # effective: key=text, value=json/order-v1
+shop.declared_feed_schema("orders")      # the Feed's own sides only
+shop.clear_feed_schema("orders")         # reverts to inheritance
 ```
 
 `SET SCHEMA ON DOMAIN|FEED <name> (KEY|VALUE <format> [SUBJECT 'x']
@@ -186,19 +191,21 @@ count = counters.get_or_default(bucket, 0)
 freshness evidence. A complete enrichment service — durable consumer,
 named-key fallback, DLQ, idempotent outputs, counters — is
 [examples/enrich_users.py](examples/enrich_users.py).
-| `client.feeds` | Raw-byte ad-hoc Feed operations: committed record reads, anonymous temporary fetches (`tail`/`wait_ms`/`new_only`), ad-hoc appends, `load(feed, start, sink)` â€” the escape hatch under `client.feed(...)` |
+| `domain.feed_ops()` | Raw-byte ad-hoc Feed operations: committed record reads, anonymous temporary fetches (`tail`/`wait_ms`/`new_only`), ad-hoc appends, `load(feed, start, sink)` -- the escape hatch under `domain.feed(...)` |
 
-| `client.subscribe(reader, feed, start, on_records)` | Managed durable consume: provisions the Reader, runs open â†’ fetch â†’ deliver â†’ ack on a background thread; `sub.close()` (or `with`) to stop |
+| `domain.subscribe(reader, feed, start, on_records)` | Managed durable consume: provisions the Reader, runs open -> fetch -> deliver -> ack on a background thread; `sub.close()` (or `with`) to stop |
 
-| `client.state_store(name[, value_type/value_codec])` | Typed facade over the node-side StateStore: `put`/`get`/`get_by`/`delete`/`iterate`/`clear`/`drop` with typed named keys and freshness evidence. `value_type=` maps a class/dataclass to JSON; `value_codec=` binds any `codecs.Codec` |
+| `domain.state_store(name[, value_type/value_codec])` | Typed facade over the node-side StateStore: `put`/`get`/`get_by`/`delete`/`iterate`/`clear`/`drop` with typed named keys and freshness evidence. `value_type=` maps a class/dataclass to JSON; `value_codec=` binds any `codecs.Codec` · `domain.define_state_store(spec[, source])` declares it |
 
 
 
 ```python
 
-store = (client.state_stores.define(
+accounts = client.domain("accounts")
 
-        StateStore.named("accounts.employees")
+store = (accounts.define_state_store(
+
+        accounts.state_store("employees")
 
         .add_key("passport", unique=True).add_key("department")))  # up to 10 named keys
 
@@ -222,7 +229,7 @@ for row in store.iterate(): export(row)   # primary-key order, bounded pages
 
 
 
-`client.feeds.load(feed, start, sink)` remains the lighter one-shot
+`feed.load(start, sink)` remains the lighter one-shot
 
 read when you don't need named-key projections. Codecs are shared
 
@@ -234,7 +241,7 @@ application code:
 
 ```python
 
-orders = client.feed("orders.events", value_type=Order)
+orders = client.domain("orders").feed("events", value_type=Order)
 
 orders.writer("ingest").append("order-1", Order("order-1", 42))
 
@@ -244,7 +251,7 @@ with orders.reader("audit", max_page_size=64) as reader:
 
 
 
-latest = client.state_store("demo.latest", value_type=Order)
+latest = client.domain("demo").state_store("latest", value_type=Order)
 
 latest.put("order-1", order)                          # same codec seam
 
@@ -293,42 +300,49 @@ model — names, never partitions or Nodes. See
 ```python
 from datetime import timedelta
 
-# Pipe declaration: the client names the business key, source and
+# Pipe declaration: the owning Domain names the business key, source and
 # outputs — the server owns panes, leases and the effect journal.
-client.define_forward_pipe("orders.relay", "orders.sub", "orders.relayed")
-client.define_enrich_pipe("orders.enrich", "orders.sub",
-    "orders.enriched", "crm.customers",
+orders = client.domain("orders")
+crm = client.domain("crm")
+stats = client.domain("stats")
+orders.define_forward_pipe("relay", "orders.sub", "relayed")
+orders.define_enrich_pipe("enrich", "orders.sub",
+    "enriched", crm.state_store("customers"),   # cross-Domain store handle
     PipeOperation.enrich(Extractor.record_key(),
         freshness=EnrichFreshness.LATEST,
         on_miss=EnrichMiss.QUARANTINE),
-    quarantine_feed="orders.enrich.dlq")
-client.define_window_pipe("orders.hourly", "orders.sub",
-    "stats.orders.hourly",
+    quarantine_feed="enrich.dlq")
+orders.define_window_pipe("hourly", "orders.sub",
+    stats.state_store("orders.hourly"),         # cross-Domain pane store
     PipeOperation.window(timedelta(hours=1),  # 1h panes
         Extractor.record_key(), WindowAggregation.count(),
         time=WindowTime.EVENT,
         watermark=timedelta(minutes=5),  # 5m horizon
         grace=timedelta(seconds=30),     # 30s late revisions
         expire=timedelta(hours=2)),
-    emit_feed="orders.hourly.emitted")
+    emit_feed="hourly.emitted")
+
+# Strings resolve inside the declaring Domain; a Feed/SubscriptionRef/
+# StateStore handle or Scoped.absolute crosses Domains explicitly —
+# see examples/cross_domain.py.
 
 # Pipe lifecycle: describe, pause, resume, drop.
 
-pipe = client.pipe("orders.relay")
+pipe = orders.pipe("relay")
 
 info = pipe.describe()        # stage, operation, outputs, status
 
 pipe.pause(); pipe.resume(); pipe.drop()
 
-pipes = client.pipes()        # the declared catalog
+pipes = orders.pipe_infos()   # the Domain-scoped catalog
 
 
 
 # Index queries: exact, prefix, or range predicates over typed values.
 
-page = client.query_index(
+page = crm.query_index(
 
-    "crm.byregion",
+    "byregion",
 
     IndexPredicate.range(
 
@@ -389,13 +403,13 @@ classes are the explicit escape hatches for the same wire contract.
 | Reading | `FeedReader.listen(handler)` SDK-owned pump → `ReaderPump` (`stop()` `failure` `running`) · `for_each(h)` blocking pump · `for m in reader` iterator · `fetch(limit)` `ack()` `close()` · `session_epoch` `acknowledged_cursor` · durable `reader_id` · `ReaderStart` — `BEGINNING`, `END`, `now()`, `cursor`, `timestamp(datetime)` |
 | Temporary fetches | `Feed.fetch(after=, limit=)` / `FeedClient.temporary_fetch` — `after_event_time_ns` seeks, `new_only`, `tail` + `wait_ms` long-poll · `Feed.records` `Feed.load` |
 | Consumers | `feed.consumer(reader)` → `FeedConsumer`: `start_at` `max_page_size` `on_record` `on_error` `backoff` `last_error` `is_running` · `run` / `run_async` / `close` |
-| Subscription members | `subscription_member(name)` → `join` `claim` `renew` `release` `fetch` `ack` — shared progress + RF3 work leases · `client.subscribe(...)` managed loop |
-| StateStores | `state_store(name)` / `StateStore.named(name)` → `view` `view_types` `add_key` `named_keys` `put` `get` `get_by` `find` `find_by` `get_or_default` `delete` `page` `iterate` `clear` `drop` · `state_stores.define` `state_stores.drop` |
-| Indexes | `query_index(name, IndexPredicate)` → `IndexPage` · `IndexPredicate.exact/prefix/range` + `IndexBound` |
-| Pipes | `define_forward_pipe` `define_enrich_pipe` `define_window_pipe` · `pipe(name)` → `describe` `pause` `resume` `drop` · `pipes()` · `PipeOperation` `WindowAggregation` `WindowTime` · durations are `datetime.timedelta` |
-| Catalog lifecycle | `create_*` `describe_*` `rename_*` `drop_*` `list_*` for Domain, Feed, Writer, Reader, Subscription, Role · `list_grants` · `open_writer_session` `seek_reader` |
+| Subscription members | `domain.member_client(name)` → `join` `claim` `renew` `release` `fetch` `ack` — shared progress + RF3 work leases · `domain.subscribe(...)` managed loop |
+| StateStores | `domain.state_store(name)` / `StateStore.named(name)` → `view` `view_types` `add_key` `named_keys` `put` `get` `get_by` `find` `find_by` `get_or_default` `delete` `page` `iterate` `clear` `drop` · `domain.define_state_store` `domain.drop_state_store` |
+| Indexes | `domain.query_index(name, IndexPredicate)` → `IndexPage` · `IndexPredicate.exact/prefix/range` + `IndexBound` |
+| Pipes | `domain.define_forward_pipe` `domain.define_enrich_pipe` `domain.define_window_pipe` — strings in-Domain, `Feed`/`SubscriptionRef`/`StateStore`/`Scoped.absolute` cross-Domain · `domain.pipe(name)` → `describe` `pause` `resume` `drop` · `domain.pipe_infos()` · `PipeOperation` `WindowAggregation` `WindowTime` · durations are `datetime.timedelta` |
+| Catalog lifecycle | Domains/roles on `client` (`create_domain` `describe_domain` `rename_domain` `drop_domain` `list_domains` `list_roles` `list_grants`) · per-resource `domain.create_*` `describe_*` `rename_*` `drop_*` for Feed, Writer, Reader, Subscription, Pipe, StateStore · `domain.open_writer_session` `domain.seek_reader` |
 | Observability | `demand_feeds` `demand_readers` `demand_subscriptions` `demand_indexes` `demand_pipes` → `DemandReport`/`DemandRow` · `hot_keys()` → `HotKey` |
-| Escape hatches | `wcl(script)` · `commands([...])` raw command batch · `WriterSessionClient` `ReaderSessionClient` `SubscriptionMemberClient` byte-level sessions · `FeedClient` raw feed ops |
+| Escape hatches | `wcl(script)` · `commands([...])` raw command batch · `WriterSessionClient` `ReaderSessionClient` `SubscriptionMemberClient` byte-level sessions (via `domain.writer`/`reader`/`member_client`) · `domain.feed_ops()` raw feed ops |
 | Errors | `WhitewaterError` — `Refused` `StaleSession` `AmbiguousResult` `Conflict` `Unavailable` `LeaseConflict` · `.code` carries the wire `code` |
 | Testing | `FakeRiverbed` — in-process loopback Riverbed implementing the wire contract (dedup, epochs, at-least-once reads, stores, WCL/commands, schemas) |
 

@@ -22,11 +22,11 @@ client = WhitewaterClient(
     ],
 )
 
-client.create_domain("demo")
-client.create_feed("demo.tail")
+demo = client.create_domain("demo")
+demo.create_feed("tail")
 
 # UTF-8 binding: appended text comes back as text on every fetch.
-tail = client.feed("demo.tail")
+tail = demo.feed("tail")
 
 after = None  # None -> feed tail position
 

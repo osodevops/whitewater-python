@@ -43,7 +43,7 @@ def test_named_key_store_lifecycle_live():
     assert client.healthy()
     client.create_domain(domain)
 
-    store = client.state_stores.define(
+    store = client._state_stores.define(
         StateStore.named(name)
         .add_key("passport", unique=True)
         .add_key("department")
@@ -77,4 +77,4 @@ def test_named_key_store_lifecycle_live():
     assert store.get(b"user-1") is None
     assert store.get_by("department", "eng").rows == []
 
-    client.state_stores.drop(name)
+    client._state_stores.drop(name)

@@ -141,7 +141,7 @@ def test_consumer_run_delivers_each_record_and_acks_the_page(stub):
         page("c2", record("c1", b"alpha"), record("c2", b"beta")),
     ]
     client = WhitewaterClient(api_key="test-key", endpoints=[url])
-    feed = client.feed("users.update.request")
+    feed = client.domain("users").feed("update.request")
     seen = []
     consumer = feed.consumer("enricher")
     thread = consumer.run_async(seen.append)
@@ -167,7 +167,7 @@ def test_consumer_iterates_records_and_break_closes_cleanly(stub):
         page("c2", record("c2", b"beta")),
     ]
     client = WhitewaterClient(api_key="test-key", endpoints=[url])
-    consumer = client.feed("users.update.request").consumer("enricher")
+    consumer = client.domain("users").feed("update.request").consumer("enricher")
 
     seen = []
     for msg in consumer:
@@ -186,7 +186,7 @@ def test_handler_failure_skips_the_ack_and_the_page_redelivers(stub):
     state, url, _lock = stub
     state["queued_pages"] = [page("c1", record("c1", b"alpha"))]
     client = WhitewaterClient(api_key="test-key", endpoints=[url])
-    feed = client.feed("users.update.request")
+    feed = client.domain("users").feed("update.request")
     errors = []
     attempts = [0]
 
@@ -213,7 +213,7 @@ def test_stale_session_reopens_and_resumes(stub):
     stale = {"error": "fenced", "code": "stale_epoch"}
     state["open_error"] = (409, stale)
     client = WhitewaterClient(api_key="test-key", endpoints=[url])
-    feed = client.feed("users.update.request")
+    feed = client.domain("users").feed("update.request")
 
     def flip_open():
         while state["opens"] == 0:
@@ -239,7 +239,7 @@ def test_startup_refusal_fails_fast(stub):
     state["wcl_body"] = {
         "error": "refused: denied", "code": "refused"}
     client = WhitewaterClient(api_key="test-key", endpoints=[url])
-    consumer = client.feed("users.update.request").consumer("enricher")
+    consumer = client.domain("users").feed("update.request").consumer("enricher")
 
     with pytest.raises(Refused):
         consumer.run(lambda _m: None)
@@ -250,7 +250,7 @@ def test_startup_refusal_fails_fast(stub):
 def test_invalid_reader_name_fails_fast_not_loops(stub):
     state, url, _lock = stub
     client = WhitewaterClient(api_key="test-key", endpoints=[url])
-    consumer = client.feed("users.update.request").consumer("Bad Name!")
+    consumer = client.domain("users").feed("update.request").consumer("Bad Name!")
 
     with pytest.raises(WhitewaterError):
         consumer.run(lambda _m: None)
@@ -264,7 +264,7 @@ def test_iteration_propagates_startup_refusal(stub):
     state["wcl_body"] = {
         "error": "refused: denied", "code": "refused"}
     client = WhitewaterClient(api_key="test-key", endpoints=[url])
-    consumer = client.feed("users.update.request").consumer("enricher")
+    consumer = client.domain("users").feed("update.request").consumer("enricher")
 
     with pytest.raises(Refused):
         next(iter(consumer))
@@ -291,8 +291,8 @@ def test_store_find_find_by_and_get_or_default(stub):
     client = WhitewaterClient(api_key="test-key", endpoints=[url])
     import whitewater.codecs as codecs
 
-    store = client.state_store(
-        "users.profiles", value_codec=codecs.json_of(str))
+    store = client.domain("users").state_store(
+        "profiles", value_codec=codecs.json_of(str))
 
     assert store.find("a@x.io") == "alice"
     assert store.find_by("user_id", "u-1") == "alice"

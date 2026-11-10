@@ -1,5 +1,5 @@
-"""``client.subscribe(...)`` runs a managed Reader-session loop and
-``client.feeds.load(...)`` pages committed history into a sink. These
+"""``domain.subscribe(...)`` runs a managed Reader-session loop and
+``domain.feed_ops.load(...)`` pages committed history into a sink. These
 tests drive both against a scripted multi-path HTTP stub.
 """
 
@@ -134,7 +134,7 @@ def test_load_pages_until_empty_and_delivers_to_the_sink(stub):
     client = WhitewaterClient(api_key="test-key", endpoints=[url])
 
     received = []
-    loaded = client.feeds.load(
+    loaded = client.domain("hr").feed_ops.load(
         "hr.employees", ReaderStart.beginning(), received.extend
     )
 
@@ -152,7 +152,7 @@ def test_load_seeks_by_event_time_then_continues_on_cursor(stub):
     client = WhitewaterClient(api_key="test-key", endpoints=[url])
 
     pages = []
-    loaded = client.feeds.load(
+    loaded = client.domain("hr").feed_ops.load(
         "hr.employees",
         ReaderStart.timestamp_ns(1697040000000000000),
         pages.append,
@@ -172,9 +172,9 @@ def test_subscribe_opens_delivers_acks_and_closes(stub):
 
     delivered = threading.Event()
     batches = []
-    sub = client.subscribe(
-        "hr.view",
-        "hr.employees",
+    sub = client.domain("hr").subscribe(
+        "view",
+        "employees",
         ReaderStart.beginning(),
         lambda records: (batches.append(records), delivered.set()),
     )
@@ -206,9 +206,9 @@ def test_subscribe_reuses_existing_reader_and_reports_stale_session(stub):
 
     errors = []
     failed = threading.Event()
-    sub = client.subscribe(
-        "hr.view",
-        "hr.employees",
+    sub = client.domain("hr").subscribe(
+        "view",
+        "employees",
         ReaderStart.now(),
         lambda records: None,
         lambda error: (errors.append(error), failed.set()),

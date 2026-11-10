@@ -127,7 +127,7 @@ def client(stub):
 
 
 def test_pipe_describe_decodes_the_catalog_row(client, stub):
-    info = client.pipe("orders.relay").describe()
+    info = client.domain("orders").pipe("relay").describe()
     assert info.name == "orders.relay"
     assert info.stage == "paused"
     assert info.subscription_id == uuid.UUID(
@@ -144,7 +144,7 @@ def test_pipe_describe_decodes_the_catalog_row(client, stub):
 
 
 def test_pipe_lifecycle_posts_the_typed_verbs(client, stub):
-    pipe = client.pipe("orders.relay")
+    pipe = client.domain("orders").pipe("relay")
     pipe.pause()
     pipe.resume()
     pipe.drop()
@@ -154,7 +154,7 @@ def test_pipe_lifecycle_posts_the_typed_verbs(client, stub):
 
 
 def test_pipes_lists_the_catalog(client, stub):
-    pipes = client.pipes()
+    pipes = client.domain("orders").pipe_infos()
     assert len(pipes) == 1
     assert pipes[0].name == "orders.relay"
     assert pipes[0].stage == "paused"
@@ -205,8 +205,8 @@ def test_hot_keys_decode_dominant_key_evidence(client, stub):
 
 
 def test_query_index_range_flattens_bounds_and_decodes_rows(client, stub):
-    page = client.query_index(
-        "crm.byregion",
+    page = client.domain("crm").query_index(
+        "byregion",
         IndexPredicate.range(
             ["emea"],
             IndexBound.inclusive_bound(0),
@@ -229,8 +229,8 @@ def test_query_index_range_flattens_bounds_and_decodes_rows(client, stub):
 
 
 def test_query_index_exact_carries_every_typed_kind(client, stub):
-    client.query_index(
-        "crm.byregion",
+    client.domain("crm").query_index(
+        "byregion",
         IndexPredicate.exact(["emea", 42, True, None, b"\x01\x02"]),
     )
     values = json.loads(stub["bodies"][0])["values"]
@@ -244,12 +244,12 @@ def test_query_index_exact_carries_every_typed_kind(client, stub):
 
 
 def test_query_index_prefix_omits_partial_text_when_absent(client, stub):
-    client.query_index("crm.byregion", IndexPredicate.prefix(["emea"]))
+    client.domain("crm").query_index("byregion", IndexPredicate.prefix(["emea"]))
     body = json.loads(stub["bodies"][0])
     assert body["mode"] == "prefix"
     assert "partial_text" not in body
 
-    client.query_index("crm.byregion",
+    client.domain("crm").query_index("byregion",
                        IndexPredicate.prefix(["emea"], "gold"))
     body = json.loads(stub["bodies"][1])
     assert body["partial_text"] == "gold"
@@ -257,5 +257,5 @@ def test_query_index_prefix_omits_partial_text_when_absent(client, stub):
 
 def test_index_predicate_rejects_unsupported_value_types(client):
     with pytest.raises(TypeError):
-        client.query_index("crm.byregion",
+        client.domain("crm").query_index("byregion",
                            IndexPredicate.exact([object()]))

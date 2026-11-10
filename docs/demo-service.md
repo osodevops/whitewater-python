@@ -18,20 +18,19 @@ client = WhitewaterClient(
     endpoints=["http://localhost:7371", "http://localhost:7372"])
 
 # ---- provision ------------------------------------------------------
-client.create_domain("shop")
-shop = client.get_domain("shop")
+shop = client.create_domain("shop")
 shop.create_feed("orders")
 shop.create_feed("orders.dlq")            # dead-letter feed
 
 # ---- produce (usually a different service) --------------------------
 # Bind codecs on the Feed handle — the SDK serializes, never b"...".
 orders = shop.feed("orders")                          # str payloads — UTF-8 default
-writer = shop.create_writer(orders).writer_id("orders.ingest").open()
+writer = shop.create_writer(orders).writer_id("ingest")        # -> shop.ingest.open()
 writer.append("order-1", '{"total":42}')
 
 # ---- consume ---------------------------------------------------------
 dlq = shop.feed("orders.dlq")
-dead_letter = shop.create_writer(dlq).writer_id("fulfillment.dlq").open()
+dead_letter = shop.create_writer(dlq).writer_id("dlq.writer")    # -> shop.dlq.writer.open()
 reader = (shop.create_reader(orders)
           .reader_id("fulfillment")          # durable id — survives restarts
           .reader_start_point(ReaderStart.BEGINNING)   # first-declare only

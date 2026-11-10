@@ -64,9 +64,9 @@ def test_creates(client):
     c, captured = client
     c.create_domain("orders")
     assert script_of(captured) == "CREATE DOMAIN orders"
-    c.create_feed("orders.events")
+    c._create_feed("orders.events")
     assert script_of(captured) == "CREATE FEED orders.events"
-    c.create_writer("checkout", "orders.events")
+    c._create_writer("checkout", "orders.events")
     assert script_of(captured) == "CREATE WRITER checkout TO orders.events"
     c.create_role("ops")
     assert script_of(captured) == "CREATE ROLE ops"
@@ -74,30 +74,30 @@ def test_creates(client):
 
 def test_readers_and_subscriptions(client):
     c, captured = client
-    c.create_reader("audit", "orders.events")
+    c._create_reader("audit", "orders.events")
     assert (
         script_of(captured)
         == "CREATE READER audit FROM orders.events START AT BEGINNING"
     )
-    c.create_reader("live", "orders.events", ReaderStart.now())
+    c._create_reader("live", "orders.events", ReaderStart.now())
     assert script_of(captured) == "CREATE READER live FROM orders.events START AT NOW"
-    c.create_reader(
+    c._create_reader(
         "rewind", "orders.events", ReaderStart.timestamp_ns(1700000000000000000)
     )
     assert script_of(captured) == (
         "CREATE READER rewind FROM orders.events "
         "START AT TIMESTAMP 1700000000000000000"
     )
-    c.create_reader("resumed", "orders.events", ReaderStart.cursor(Cursor("abc'def")))
+    c._create_reader("resumed", "orders.events", ReaderStart.cursor(Cursor("abc'def")))
     assert script_of(captured) == (
         "CREATE READER resumed FROM orders.events START AT CURSOR 'abc''def'"
     )
-    c.create_subscription("team", "orders.events", ReaderStart.now())
+    c._create_subscription("team", "orders.events", ReaderStart.now())
     assert (
         script_of(captured)
         == "CREATE SUBSCRIPTION team FROM orders.events START AT NOW"
     )
-    c.create_subscription("orders.sub", "orders.events", ReaderStart.beginning())
+    c._create_subscription("orders.sub", "orders.events", ReaderStart.beginning())
     assert (
         script_of(captured)
         == "CREATE SUBSCRIPTION orders.sub FROM orders.events START AT BEGINNING"
@@ -106,25 +106,25 @@ def test_readers_and_subscriptions(client):
 
 def test_sessions_and_seek(client):
     c, captured = client
-    c.open_writer_session("checkout")
+    c._open_writer_session("checkout")
     assert script_of(captured) == "OPEN WRITER SESSION checkout"
-    c.seek_reader("audit", ReaderStart.now())
+    c._seek_reader("audit", ReaderStart.now())
     assert script_of(captured) == "SEEK READER audit TO NOW"
 
 
 def test_describe_rename_drop_show(client):
     c, captured = client
-    c.describe_feed("orders.events")
+    c._describe_feed("orders.events")
     assert script_of(captured) == "DESCRIBE FEED orders.events"
-    c.describe_subscription("team")
+    c._describe_subscription("team")
     assert script_of(captured) == "DESCRIBE SUBSCRIPTION team"
     c.rename_domain("orders", "billing")
     assert script_of(captured) == "RENAME DOMAIN orders TO billing"
-    c.rename_feed("orders.events", "orders.accepted")
+    c._rename_feed("orders.events", "orders.accepted")
     assert script_of(captured) == "RENAME FEED orders.events TO orders.accepted"
-    c.drop_writer("checkout")
+    c._drop_writer("checkout")
     assert script_of(captured) == "DROP WRITER checkout"
-    c.list_feeds()
+    c._list_feeds()
     assert script_of(captured) == "SHOW FEEDS"
     c.list_domains()
     assert script_of(captured) == "SHOW DOMAINS"
@@ -133,17 +133,17 @@ def test_describe_rename_drop_show(client):
 def test_invalid_names_fail_locally(client):
     c, captured = client
     with pytest.raises(ValueError):
-        c.create_feed("UPPER.case")
+        c._create_feed("UPPER.case")
     with pytest.raises(ValueError):
-        c.create_feed(".leading")
+        c._create_feed(".leading")
     with pytest.raises(ValueError):
         c.create_domain("two words")
     with pytest.raises(ValueError):
-        c.create_writer("bad;name", "orders.events")
+        c._create_writer("bad;name", "orders.events")
     with pytest.raises(ValueError):
-        c.create_reader("a'b", "orders.events")
+        c._create_reader("a'b", "orders.events")
     with pytest.raises(ValueError):
-        c.create_subscription("orders-sub", "orders.events")
+        c._create_subscription("orders-sub", "orders.events")
     with pytest.raises(ValueError):
         c.rename_domain("orders", "INJECTION; DROP")
     assert captured["path"] == ""

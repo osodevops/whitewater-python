@@ -1,4 +1,4 @@
-"""``client.feed(...)`` binds codecs once so keys/payloads serialize
+"""``domain.feed(...)`` binds codecs once so keys/payloads serialize
 automatically in both directions — these tests drive the typed Feed,
 FeedWriter, FeedReader, subscribe, and codec-bound StateStore paths
 against a scripted HTTP stub and assert exact wire shapes."""
@@ -191,19 +191,19 @@ def last_body(state, path):
 
 
 def test_default_binding_is_utf8_keys_and_payloads(stub, client):
-    feed = client.feed("orders.events")
+    feed = client.domain("orders").feed("events")
     assert feed.name == "orders.events"
     assert feed.key_codec.decode(b"k") == "k"
     assert feed.value_codec.decode(b"v") == "v"
 
 
 def test_bytes_payloads_bind_through_an_explicit_codec(stub, client):
-    feed = client.feed("orders.events", value_type=bytes)
+    feed = client.domain("orders").feed("events", value_type=bytes)
     assert feed.value_codec.decode(b"v") == b"v"
 
 
 def test_records_decode_through_bound_codecs(stub, client):
-    orders = client.feed("orders.events", value_type=Order)
+    orders = client.domain("orders").feed("events", value_type=Order)
     page = orders.records(limit=50, after=Cursor.of("prev"))
     assert len(page) == 2
     assert page[0].key == "order-1"
@@ -214,7 +214,7 @@ def test_records_decode_through_bound_codecs(stub, client):
 
 
 def test_fetch_returns_decoded_page_with_next_cursor(stub, client):
-    page = client.feed("orders.events", value_type=Order).fetch(
+    page = client.domain("orders").feed("events", value_type=Order).fetch(
         TemporaryFetchOptions.page(Cursor.of("after-1"), 100)
     )
     assert str(page.next_cursor) == "frontier-9"
@@ -222,7 +222,7 @@ def test_fetch_returns_decoded_page_with_next_cursor(stub, client):
 
 
 def test_view_rebinds_codecs_without_a_wire_call(stub, client):
-    typed = client.feed("orders.events", value_type=Order)
+    typed = client.domain("orders").feed("events", value_type=Order)
     raw = typed.view(codecs.utf8(), codecs.raw())
     assert raw.name == "orders.events"
     page = raw.records(limit=10)
@@ -233,7 +233,7 @@ def test_view_rebinds_codecs_without_a_wire_call(stub, client):
 
 
 def test_writer_declares_opens_and_serializes(stub, client):
-    writer = client.feed("orders.events", value_type=Order).writer("orders.ingest")
+    writer = client.domain("orders").feed("events", value_type=Order).writer("ingest")
     assert any("CREATE WRITER" in b for b in stub["bodies"]), "writer was declared"
     assert any("open_writer_session" in b for b in stub["bodies"])
 
@@ -248,12 +248,12 @@ def test_writer_declares_opens_and_serializes(stub, client):
 
 def test_writer_tolerates_already_declared(stub, client):
     stub["refuse_creates"] = True
-    writer = client.feed("orders.events", value_type=Order).writer("orders.ingest")
+    writer = client.domain("orders").feed("events", value_type=Order).writer("ingest")
     assert writer.session_epoch == 42
 
 
 def test_append_event_carries_identity_time_and_metadata(stub, client):
-    writer = client.feed("orders.events", value_type=Order).writer("orders.ingest")
+    writer = client.domain("orders").feed("events", value_type=Order).writer("ingest")
     rid = uuid.UUID("019a0000-0000-7000-8000-0000000000cc")
     writer.append_event(
         FeedEvent("order-7", Order("order-7", 7))
@@ -268,7 +268,7 @@ def test_append_event_carries_identity_time_and_metadata(stub, client):
 
 
 def test_append_all_serializes_every_event(stub, client):
-    writer = client.feed("orders.events", value_type=Order).writer("orders.ingest")
+    writer = client.domain("orders").feed("events", value_type=Order).writer("ingest")
     result = writer.append_all([
         FeedEvent("o1", Order("o1", 1)),
         FeedEvent("o2", Order("o2", 2)),
@@ -282,7 +282,7 @@ def test_append_all_serializes_every_event(stub, client):
 
 def test_ad_hoc_append_serializes_through_facade(stub, client):
     session = uuid.UUID("019a0000-0000-7000-8000-0000000000bb")
-    result = client.feed("orders.events", value_type=Order).append(
+    result = client.domain("orders").feed("events", value_type=Order).append(
         session, 3, 9, "order-1", Order("order-1", 5)
     )
     sent = last_body(stub, "/v1/feeds/append")
@@ -293,7 +293,7 @@ def test_ad_hoc_append_serializes_through_facade(stub, client):
 
 
 def test_reader_declares_opens_and_decodes(stub, client):
-    with client.feed("orders.events", value_type=Order).reader("orders.audit", 64) as reader:
+    with client.domain("orders").feed("events", value_type=Order).reader("audit", 64) as reader:
         assert any("CREATE READER" in b for b in stub["bodies"]), "reader declared"
         page = reader.fetch()
         assert len(page.records) == 1
@@ -309,7 +309,7 @@ def test_reader_declares_opens_and_decodes(stub, client):
 
 def test_reader_tolerates_already_declared(stub, client):
     stub["refuse_creates"] = True
-    with client.feed("orders.events", value_type=Order).reader("orders.audit", 64) as reader:
+    with client.domain("orders").feed("events", value_type=Order).reader("audit", 64) as reader:
         assert reader.session_epoch == 7
 
 
@@ -321,7 +321,7 @@ def test_subscribe_delivers_decoded_batches_and_acks(stub, client):
         seen["msg"] = batch[0]
         delivered.set()
 
-    feed = client.feed("orders.events", value_type=Order)
+    feed = client.domain("orders").feed("events", value_type=Order)
     with feed.subscribe("orders.sub", ReaderStart.beginning(), on_records):
         assert delivered.wait(5), "subscription delivered"
         assert seen["msg"].key == "order-1"
@@ -361,13 +361,13 @@ def test_custom_codec_applies_both_directions(stub, client):
         lambda s: s[::-1].encode(),
         lambda b: b.decode()[::-1],
     )
-    feed = client.feed("orders.events", value_codec=reversed_codec)
+    feed = client.domain("orders").feed("events", value_codec=reversed_codec)
     page = feed.records(limit=10)
     assert page[0].value == order_payload("order-1", 10)[::-1]
 
 
 def test_state_store_serializes_through_codecs(stub, client):
-    store = client.state_store("app.users", value_type=Order)
+    store = client.domain("app").state_store("users", value_type=Order)
     store.put("u1", Order("u1", 3))
     sent = last_body(stub, "/v1/state-stores/mutate")
     op = sent["op"]

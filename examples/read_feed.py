@@ -37,17 +37,19 @@ client = WhitewaterClient(
     ],
 )
 
-client.create_domain("demo")
-client.create_feed("demo.orders")
+# The Domain is the front door: feeds are created and bound through it,
+# so every name stays inside the business namespace.
+demo = client.create_domain("demo")
+demo.create_feed("orders")
 
 # One binding carries the feed name + codecs. Order maps to JSON;
 # codecs.of(...) binds protobuf/msgpack/custom formats the same way.
-orders = client.feed("demo.orders", value_type=Order)
+orders = demo.feed("orders", value_type=Order)
 
 # Declares the Reader if missing (durable Control Plane state), opens
 # the session, and owns the fence. Another client opening the same
 # Reader supersedes this session (stale_epoch on the next fetch).
-with orders.reader("demo.reader", capacity=64) as reader:
+with orders.reader("reader", capacity=64) as reader:
     while True:
         # fetch() returns immediately with whatever is committed — a
         # Reader is not a long-poll. For "sit and wait" behavior, use

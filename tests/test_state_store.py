@@ -1,4 +1,4 @@
-"""``client.state_store(...)`` is a thin facade over the node-side
+"""``domain.state_store(...)`` is a thin facade over the node-side
 StateStore: these tests drive every operation against a scripted HTTP
 stub and assert the exact wire shapes — declare commands, typed named
 values, journal mutations, lookups, iteration pages, clear, and drop.
@@ -93,7 +93,7 @@ def test_define_emits_named_keys_and_binds_the_facade(stub):
         .add_key("passport", unique=True)
         .add_key("department")
     )
-    store = client.state_stores.define(spec)
+    store = client._state_stores.define(spec)
 
     commands = bodies(state, "/v1/admin/commands")
     assert commands == [
@@ -120,13 +120,13 @@ def test_define_feed_sourced_named_keys_need_extractors(stub):
     client = WhitewaterClient(api_key="test-key", endpoints=[url])
     # A feed-sourced named key without a projection is a declaration bug.
     with pytest.raises(ValueError, match="require an extractor"):
-        client.state_stores.define(
+        client._state_stores.define(
             StateStore.named("accounts.s").add_key("k"),
             source="accounts.events",
         )
     # An extractor on a manual store is refused — puts carry the values.
     with pytest.raises(ValueError, match="manual store"):
-        client.state_stores.define(
+        client._state_stores.define(
             StateStore.named("accounts.m").add_key(
                 "k", extractor=Extractor.metadata("pp")
             )
@@ -143,7 +143,7 @@ def test_define_feed_sourced_emits_extractors(stub):
         .add_key("passport", unique=True, extractor=Extractor.metadata("pp"))
         .add_key("department", extractor=Extractor.json("dept"))
     )
-    store = client.state_stores.define(spec, source="accounts.events")
+    store = client._state_stores.define(spec, source="accounts.events")
 
     commands = bodies(state, "/v1/admin/commands")
     assert commands == [
@@ -199,7 +199,7 @@ def test_put_get_get_by_delete_carry_wire_shapes(stub):
         **FRESHNESS,
     }
     client = WhitewaterClient(api_key="test-key", endpoints=[url])
-    store = client.state_store("accounts.employees")
+    store = client.domain("accounts").state_store("employees")
 
     result = store.put(
         "user-1",
@@ -263,7 +263,7 @@ def test_iterate_pages_until_exhausted_then_clear_and_drop(stub):
     state["bodies"]["/v1/state-stores/clear"] = MUTATION
     state["bodies"]["/v1/admin/commands"] = COMMANDS_OK
     client = WhitewaterClient(api_key="test-key", endpoints=[url])
-    store = client.state_store("accounts.employees")
+    store = client.domain("accounts").state_store("employees")
 
     keys = [row.key for row in store.iterate(limit=100)]
     assert keys == ["a", "b"]

@@ -30,6 +30,8 @@ from .domain import (
     FeedSchema,
     SchemaDecl,
     ReaderBuilder,
+    Scoped,
+    SubscriptionRef,
     WriterBuilder,
 )
 from .operations import (
@@ -94,6 +96,8 @@ __all__ = [
     "Domain",
     "FeedSchema",
     "SchemaDecl",
+    "Scoped",
+    "SubscriptionRef",
     "Extractor",
     "FakeRiverbed",
     "Feed",

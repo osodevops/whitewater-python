@@ -14,10 +14,10 @@ across restarts. No offset management, ever.
 
 Prerequisites (against the dev cluster)::
 
-    client.create_domain("users")
-    client.create_feed("users.update.request")
-    client.create_feed("users.update.enriched.request")
-    client.create_feed("users.update.dlq")
+    users_domain = client.create_domain("users")
+    users_domain.create_feed("update.request")
+    users_domain.create_feed("update.enriched.request")
+    users_domain.create_feed("dlq")
     # users.profiles declared with named key "user_id"; users.stats manual.
 
 Replay honesty: between "enriched append committed" and "input acked" a
@@ -83,15 +83,16 @@ client = WhitewaterClient(
 
 # ---- surfaces, codec-bound once -------------------------------------
 
-in_feed = client.feed("users.update.request", value_type=UpdateRequest)
-out_feed = client.feed("users.update.enriched.request",
-                       value_type=EnrichedUpdate)
-dlq_feed = client.feed("users.update.dlq", value_type=DeadLetter)
+users_domain = client.domain("users")
+in_feed = users_domain.feed("update.request", value_type=UpdateRequest)
+out_feed = users_domain.feed("update.enriched.request",
+                             value_type=EnrichedUpdate)
+dlq_feed = users_domain.feed("dlq", value_type=DeadLetter)
 
 # users store: primary key email, declared named key "user_id".
-users = client.state_store("users.profiles", value_type=UserProfile)
+users = users_domain.state_store("profiles", value_type=UserProfile)
 # counters store: bucket key -> running total.
-counters = client.state_store("users.stats", value_type=int)
+counters = users_domain.state_store("stats", value_type=int)
 
 out_writer = out_feed.writer("enricher")
 dlq_writer = dlq_feed.writer("enricher")

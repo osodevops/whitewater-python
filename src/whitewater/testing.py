@@ -10,7 +10,7 @@ paths a live Node sees — without Docker or a running Riverbed::
     def test_pipeline():
         with FakeRiverbed() as riverbed:
             client = riverbed.client()
-            orders = client.feed("orders.events")
+            orders = client.domain("orders").feed("events")
             orders.writer("ingest").append("order-1", b"created")
             with orders.reader("audit") as reader:
                 page = reader.fetch()          # records arrive in order
@@ -953,15 +953,6 @@ class _Riverbed:
         item = self.domains.get(resource_name.split(".")[0])
         return item.resource_id if item is not None else None
 
-    def _subscription_space_id(self, subscription_id: Any) -> Optional[str]:
-        for sub in self.subscriptions.values():
-            if sub.subscription_id == subscription_id:
-                if sub.source[0] == "domain":
-                    domain = self.domains.get(sub.source[1])
-                    return domain.resource_id if domain is not None else None
-                return self._space_id_of(sub.source[1])
-        return None
-
     def _resource_row(self, table: str, item: Any) -> dict:
         """The catalog row SHOW/DESCRIBE surfaces for one resource."""
         if table == "domains":
@@ -977,19 +968,12 @@ class _Riverbed:
             row.update({k: v for k, v in self._reader_session_body(item).items() if k in ("delivered_cursor", "acknowledged_cursor")})
             return row
         if table == "subscriptions":
-            space_id = None
-            if item.source[0] == "domain":
-                domain = self.domains.get(item.source[1])
-                space_id = domain.resource_id if domain is not None else None
-            else:
-                space_id = self._space_id_of(item.source[1])
-            return {"name": item.name, "subscription_id": item.subscription_id, "space_id": space_id, item.source[0]: item.source[1], "start": {"kind": item.start[0]}, "stage": "declared", "status": "active", "created_at_ns": item.created_at_ns}
+            return {"name": item.name, "subscription_id": item.subscription_id, "space_id": self._space_id_of(item.name), item.source[0]: item.source[1], "start": {"kind": item.start[0]}, "stage": "declared", "status": "active", "created_at_ns": item.created_at_ns}
         if table == "stores":
-            feed_name = item.source[1]
-            space_id = self._space_id_of(feed_name) if feed_name else self._space_id_of(item.name)
+            space_id = self._space_id_of(item.name)
             return {"name": item.name, "store_id": item.store_id, "space_id": space_id, "source": {"kind": item.source[0], **({"feed": item.source[1]} if item.source[1] else {})}, "named_keys": [{"name": n, "unique": u} for n, u in item.named_keys.items()], "stage": "dropped" if item.dropped else "declared", "status": "active", "created_at_ns": item.created_at_ns}
         if table == "pipes":
-            return {"name": item.name, "pipe_id": item.pipe_id, "subscription_id": item.subscription_id, "space_id": self._subscription_space_id(item.subscription_id), "operation": item.operation, "output_feed_id": item.output_feed_id, "output_store_id": item.output_store_id, "stage": item.stage, "status": "active", "created_at_ns": item.created_at_ns}
+            return {"name": item.name, "pipe_id": item.pipe_id, "subscription_id": item.subscription_id, "space_id": self._space_id_of(item.name), "operation": item.operation, "output_feed_id": item.output_feed_id, "output_store_id": item.output_store_id, "stage": item.stage, "status": "active", "created_at_ns": item.created_at_ns}
         if table == "indexes":
             return {"name": item.name, "index_id": item.index_id, "space_id": self._space_id_of(item.feed), "feed": item.feed, "fields": item.fields, "unique": item.unique, "stage": item.stage, "status": "active", "created_at_ns": item.created_at_ns}
         return {"name": item.name, "role_id": item.resource_id, "status": "active", "created_at_ns": item.created_at_ns}
@@ -1666,7 +1650,7 @@ class FakeRiverbed:
 
         with FakeRiverbed() as riverbed:
             client = riverbed.client()
-            client.feed("orders.events").writer("ingest").append("k", b"v")
+            client.domain("orders").feed("events").writer("ingest").append("k", b"v")
 
     Modeled semantics: committed-order records, opaque Cursors, append
     dedupe by ``(writer, session_epoch, request_id)`` and ad-hoc

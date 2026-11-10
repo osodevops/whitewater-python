@@ -23,7 +23,8 @@ Every Pipe names a **Subscription** — the durable delivery lease it pulls
 input through. Declare one per Pipe:
 
 ```python
-client.create_subscription("orders.sub", "ops.orders")
+ops = client.domain("ops")     # or client.create_domain("ops")
+ops.create_subscription("orders.sub", "orders")
 # start defaults to ReaderStart.beginning(); now()/cursor()/timestamp_ns()
 # select other starts.
 ```
@@ -33,20 +34,25 @@ client.create_subscription("orders.sub", "ops.orders")
 ```python
 from whitewater import Extractor
 
-store = (client.state_store("ops.customers")
+store = (ops.state_store("customers")
          .add_key("email", unique=True, extractor=Extractor.json("$.email"))
          .add_key("tier", extractor=Extractor.json("$.tier")))
-client.state_stores.define(store, source="ops.customer.changes")
+ops.define_state_store(store, source="customer.changes")
 ```
 
 ## 2. Forward pipes
 
 ```python
-client.define_forward_pipe(
-    "ops.orders.relay",    # pipe name (dotted)
+ops.define_forward_pipe(
+    "orders.relay",        # pipe name, relative -> ops.orders.relay
     "orders.sub",          # source subscription
-    "ops.orders.relayed",  # output feed
+    "orders.relayed",      # output feed -> ops.orders.relayed
 )
+
+# Endpoints can cross Domains explicitly: a Feed/SubscriptionRef/StateStore
+# handle or Scoped.absolute carries its qualified name, while strings stay
+# in-Domain — e.g. ops.define_forward_pipe("relay", "orders.sub",
+# warehouse.feed("inbound")). See examples/cross_domain.py.
 ```
 
 ## 3. Enrich pipes
@@ -59,18 +65,18 @@ journal — replayed outputs are byte-identical.
 ```python
 from whitewater import PipeOperation, Extractor, EnrichFreshness, EnrichMiss
 
-client.define_enrich_pipe(
-    "ops.orders.enrich",
+ops.define_enrich_pipe(
+    "orders.enrich",
     "orders.sub",
-    "ops.enriched",
-    "ops.customers",                    # lookup store
+    "enriched",
+    "customers",                        # lookup store
     PipeOperation.enrich(
         Extractor.json("$.customerId"),
         freshness=EnrichFreshness.LATEST,     # or EnrichFreshness.STRICT
         named="email",                        # named key; None = primary
         on_miss=EnrichMiss.QUARANTINE,        # FORWARD | DROP | QUARANTINE
     ),
-    quarantine_feed="ops.enrich.misses",      # required for QUARANTINE
+    quarantine_feed="enrich.misses",        # required for QUARANTINE
 )
 ```
 
@@ -83,14 +89,14 @@ enumerable without composite row keys:
 ```python
 from whitewater import WindowAggregation, WindowTime
 
-client.state_stores.define(
-    client.state_store("ops.order.counts").add_key("key").add_key("pane")
+ops.define_state_store(
+    ops.state_store("order.counts").add_key("key").add_key("pane")
 )
 
-client.define_window_pipe(
-    "ops.orders.hourly",
+ops.define_window_pipe(
+    "orders.hourly",
     "orders.sub",
-    "ops.order.counts",                 # pane store (declared above)
+    "order.counts",                     # pane store (declared above)
     PipeOperation.window(
         timedelta(hours=1),             # 1h panes
         Extractor.json("$.region"),
@@ -101,7 +107,7 @@ client.define_window_pipe(
         expire=timedelta(hours=24),     # keep panes 24h
         key_limit=10_000,
     ),
-    emit_feed="ops.hourly.emits",       # optional closed-pane output
+    emit_feed="hourly.emits",           # optional closed-pane output
 )
 ```
 
@@ -133,14 +139,14 @@ WindowAggregation.average(Extractor.json("$.rtt"))
 ## 5. Lifecycle
 
 ```python
-pipe = client.pipe("ops.orders.relay")
+pipe = ops.pipe("orders.relay")
 
 info = pipe.describe()   # stage, operation, outputs, status
 pipe.pause()             # cooperative; the frontier stays put
 pipe.resume()            # restarts from the durable frontier
 pipe.drop()
 
-all_pipes = client.pipes()
+all_pipes = ops.pipe_infos()
 ```
 
 `pause` is durable and idempotent — nothing is dropped while paused.

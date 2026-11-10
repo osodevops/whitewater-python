@@ -42,7 +42,7 @@ def test_exported_and_serves_health(riverbed, client):
 
 
 def test_append_fetch_ack_then_reopen_stays_drained(riverbed, client):
-    orders = client.feed("orders.events")
+    orders = client.domain("orders").feed("events")
     writer = orders.writer("ingest")
     writer.append("order-1", "created")
     writer.append("order-2", "paid")
@@ -60,7 +60,7 @@ def test_append_fetch_ack_then_reopen_stays_drained(riverbed, client):
 
 
 def test_unacknowledged_close_redelivers(riverbed, client):
-    orders = client.feed("orders.events")
+    orders = client.domain("orders").feed("events")
     orders.writer("ingest").append("order-1", "created")
 
     with orders.reader("audit") as reader:
@@ -77,11 +77,11 @@ def test_unacknowledged_close_redelivers(riverbed, client):
 
 
 def test_fetch_request_id_replays_committed_page(riverbed, client):
-    orders = client.feed("orders.events")
+    orders = client.domain("orders").feed("events")
     orders.writer("ingest").append("order-1", "created")
 
-    session_client = client.reader("audit")
-    client.create_reader("audit", "orders.events")
+    session_client = client.domain("orders").reader("audit")
+    client.domain("orders").create_reader("audit", "events")
     session = session_client.open(capacity=8)
     request_id = uuid.uuid4()
     first = session_client.fetch(session, request_id=request_id)
@@ -91,7 +91,7 @@ def test_fetch_request_id_replays_committed_page(riverbed, client):
 
 
 def test_append_request_id_deduplicates(riverbed, client):
-    orders = client.feed("orders.events")
+    orders = client.domain("orders").feed("events")
     writer = orders.writer("ingest")
 
     request_id = uuid.uuid4()
@@ -112,7 +112,7 @@ def test_append_request_id_deduplicates(riverbed, client):
 
 
 def test_append_batch(riverbed, client):
-    orders = client.feed("orders.events")
+    orders = client.domain("orders").feed("events")
     writer = orders.writer("ingest")
     result = writer.append_all(
         [FeedEvent("order-1", "a"), FeedEvent("order-2", "b")]
@@ -122,8 +122,8 @@ def test_append_batch(riverbed, client):
 
 
 def test_adhoc_append_sequence_fencing(riverbed, client):
-    client.create_feed("orders.events")
-    orders = client.feed("orders.events")
+    client.domain("orders").create_feed("events")
+    orders = client.domain("orders").feed("events")
     session = uuid.uuid4()
     orders.append(session, 1, 1, "k", "a")
     orders.append(session, 1, 2, "k", "b")
@@ -135,7 +135,7 @@ def test_adhoc_append_sequence_fencing(riverbed, client):
 
 
 def test_stale_writer_epoch_maps_to_stale_session(riverbed, client):
-    orders = client.feed("orders.events")
+    orders = client.domain("orders").feed("events")
     stale = orders.writer("ingest")
     live = orders.writer("ingest")  # a new session supersedes the old epoch
     assert live.session_epoch == stale.session_epoch + 1
@@ -146,15 +146,15 @@ def test_stale_writer_epoch_maps_to_stale_session(riverbed, client):
 
 
 def test_revoked_writer_session_maps_to_stale_session(riverbed, client):
-    orders = client.feed("orders.events")
+    orders = client.domain("orders").feed("events")
     writer = orders.writer("ingest")
-    client.wcl(f"REVOKE WRITER SESSION ingest EPOCH {writer.session_epoch}")
+    client.wcl(f"REVOKE WRITER SESSION orders.ingest EPOCH {writer.session_epoch}")
     with pytest.raises(StaleSession):
         writer.append("k", "v")
 
 
 def test_temporary_fetch_and_records(riverbed, client):
-    orders = client.feed("orders.events")
+    orders = client.domain("orders").feed("events")
     writer = orders.writer("ingest")
     for index in range(3):
         writer.append(f"order-{index}", f"event-{index}".encode())
@@ -176,7 +176,7 @@ def test_temporary_fetch_and_records(riverbed, client):
 
 
 def test_state_store_manual_lifecycle(riverbed, client):
-    store = client.state_stores.define(
+    store = client._state_stores.define(
         StateStore.named("ops.profiles").add_key("department")
     )
     first = store.put("emp-1", "alice", named={"department": "eng"})
@@ -205,7 +205,7 @@ def test_state_store_manual_lifecycle(riverbed, client):
 
 
 def test_state_store_mutation_id_dedupes(riverbed, client):
-    store = client.state_stores.define(StateStore.named("ops.mutations"))
+    store = client._state_stores.define(StateStore.named("ops.mutations"))
     mutation_id = uuid.uuid4()
     first = store.put("k", "v1", mutation_id=mutation_id)
     retry = store.put("k", "v1", mutation_id=mutation_id)
@@ -217,7 +217,7 @@ def test_state_store_mutation_id_dedupes(riverbed, client):
 
 
 def test_state_store_named_key_rules(riverbed, client):
-    store = client.state_stores.define(
+    store = client._state_stores.define(
         StateStore.named("ops.directory").add_key("email", unique=True)
     )
     store.put("user-1", "alice", named={"email": "alice@corp.test"})
@@ -231,8 +231,8 @@ def test_wcl_catalog_declarations(riverbed, client):
     execution = client.wcl(
         "CREATE DOMAIN orders;"
         "CREATE FEED orders.events;"
-        "CREATE WRITER ingest TO orders.events;"
-        "CREATE READER audit FROM orders.events START AT BEGINNING;"
+        "CREATE WRITER orders.ingest TO orders.events;"
+        "CREATE READER orders.audit FROM orders.events START AT BEGINNING;"
     )
     assert execution.authority == "control_plane"
     assert [r.statement for r in execution.results] == [
@@ -242,15 +242,15 @@ def test_wcl_catalog_declarations(riverbed, client):
         "CREATE READER",
     ]
 
-    described = client.describe_feed("orders.events")
+    described = client.domain("orders").describe_feed("events")
     assert described.results[0].data["name"] == "orders.events"
     assert described.results[0].data["feed_id"]
 
-    shown = client.list_feeds()
+    shown = client.wcl("SHOW FEEDS")
     assert [r["name"] for r in shown.results[0].data] == ["orders.events"]
 
     with pytest.raises(Refused, match="exists"):
-        client.create_feed("orders.events")
+        client.domain("orders").create_feed("events")
 
     # Control executions dedupe on request_id like the real journal.
     request_id = uuid.uuid4()
@@ -261,25 +261,25 @@ def test_wcl_catalog_declarations(riverbed, client):
     assert repeat.request_id == again.request_id
     assert [r.statement for r in repeat.results] == [r.statement for r in again.results]
 
-    client.drop_reader("audit")
+    client.domain("orders").drop_reader("audit")
     with pytest.raises(Refused):
-        client.reader("audit").open()
+        client.domain("orders").reader("audit").open()
 
 
 def test_reader_start_variants(riverbed, client):
-    orders = client.feed("orders.events")
+    orders = client.domain("orders").feed("events")
     writer = orders.writer("ingest")
     writer.append("k1", "first")
     second = writer.append("k2", "second")
     writer.append("k3", "third")
 
-    client.create_reader(
-        "from.cursor", "orders.events", start=ReaderStart.cursor(second.cursor)
+    client.domain("orders").create_reader(
+        "from.cursor", "events", start=ReaderStart.cursor(second.cursor)
     )
-    session = client.reader("from.cursor").open(capacity=8)
-    page = client.reader("from.cursor").fetch(session)
+    session = client.domain("orders").reader("from.cursor").open(capacity=8)
+    page = client.domain("orders").reader("from.cursor").fetch(session)
     assert [r.payload for r in page.records] == [b"third"]
-    client.reader("from.cursor").close(session)
+    client.domain("orders").reader("from.cursor").close(session)
 
 
 def test_unknown_path_and_errors_decode(riverbed, client):
@@ -291,7 +291,7 @@ def test_unknown_path_and_errors_decode(riverbed, client):
 
 
 def test_subscribe_delivers_and_acks(riverbed, client):
-    orders = client.feed("orders.events")
+    orders = client.domain("orders").feed("events")
     orders.writer("ingest").append("order-1", "created")
 
     received = []
@@ -302,7 +302,7 @@ def test_subscribe_delivers_and_acks(riverbed, client):
         done.set()
 
     errors = []
-    with client.subscribe(
+    with client.domain("orders").subscribe(
         "audit",
         "orders.events",
         ReaderStart.beginning(),
@@ -319,11 +319,11 @@ def test_subscribe_delivers_and_acks(riverbed, client):
 def test_reader_session_close_and_reopen_via_low_level_client(riverbed, client):
     """ReaderSessionClient round-trips the same durable progress the
     ``FeedReader`` facade uses."""
-    orders = client.feed("orders.events")
+    orders = client.domain("orders").feed("events")
     orders.writer("ingest").append("k", "v")
-    client.create_reader("audit", "orders.events")
+    client.domain("orders").create_reader("audit", "events")
 
-    reader = client.reader("audit")
+    reader = client.domain("orders").reader("audit")
     session = reader.open(capacity=4)
     page = reader.fetch(session)
     assert [r.payload for r in page.records] == [b"v"]

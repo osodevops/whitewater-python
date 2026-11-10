@@ -3,7 +3,7 @@
 Bind ``Codec``s once on :meth:`WhitewaterClient.feed` and keys/payloads
 serialize automatically in both directions::
 
-    orders = client.feed("orders.events", value_codec=codecs.json_of(Order))
+    orders = client.domain("orders").feed("events", value_codec=codecs.json_of(Order))
 
     orders.writer("ingest").append("order-1", Order("order-1", 42))
 
@@ -12,7 +12,7 @@ serialize automatically in both directions::
             handle(message.value)               # decoded — never .encode()
         reader.ack()
 
-``client.feed(name)`` binds ``str`` keys with raw ``bytes`` payloads;
+``domain.feed(name)`` binds ``str`` keys with raw ``bytes`` payloads;
 ``view`` rebinds the same feed under different codecs —
 ``feed.view(utf8(), raw())`` is the escape hatch to wire bytes.
 """
@@ -361,7 +361,7 @@ class Feed(Generic[K, V]):
     the Nodes. The bound codecs serialize on write and deserialize on
     read, so application code stays in its own types::
 
-        orders = client.feed("orders.events", value_type=Order)
+        orders = client.domain("orders").feed("events", value_type=Order)
         orders.writer("ingest").append("order-1", Order("order-1", 42))
 
         with orders.reader("audit", max_page_size=64) as reader:
@@ -379,12 +379,24 @@ class Feed(Generic[K, V]):
         value_codec: Codec[V],
         *,
         feed_client=None,
+        scope: Optional[str] = None,
     ):
         self._client = client
-        self._feed_client = feed_client or client.feeds
+        self._feed_client = feed_client or client._feeds
         self.name = name
         self.key_codec = key_codec
         self.value_codec = value_codec
+        # The Domain this Feed was bound inside — writer/reader/consumer
+        # names resolve under it so identities stay in the namespace.
+        self._scope = scope or name.split(".", 1)[0]
+
+    def _resolve(self, resource_name: str) -> str:
+        """Resolve ``resource_name`` inside this Feed's Domain —
+        ``"ingest"`` on ``shop.orders`` is ``shop.ingest``; an
+        already-qualified name passes through."""
+        if resource_name.startswith(self._scope + "."):
+            return resource_name
+        return f"{self._scope}.{resource_name}"
 
     # ---- reading ----------------------------------------------------------
 
@@ -429,10 +441,13 @@ class Feed(Generic[K, V]):
     def writer(self, writer_name: str) -> FeedWriter[K, V]:
         """A session-bound Writer on this Feed: declares the Writer when
         missing (reusing an existing one), opens a session, and binds the
-        feed's codecs so ``writer.append(key, value)`` just works."""
+        feed's codecs so ``writer.append(key, value)`` just works.
+        ``writer_name`` resolves inside the Feed's Domain — ``"ingest"``
+        on ``shop.orders`` declares ``shop.ingest``."""
+        writer_name = self._resolve(writer_name)
         self._ensure_writer(writer_name)
         session_epoch = self._open_writer_session(writer_name)
-        session = self._client.writer(writer_name, session_epoch)
+        session = self._client._writer(writer_name, session_epoch)
         return FeedWriter(session, self.key_codec, self.value_codec)
 
     def append(
@@ -469,9 +484,10 @@ class Feed(Generic[K, V]):
     def reader(self, reader_name: str, max_page_size: int = 64) -> FeedReader[K, V]:
         """A session-bound named Reader on this Feed: declares the Reader
         (at BEGINNING) when missing, opens a session, and returns decoded
-        messages."""
+        messages. ``reader_name`` resolves inside the Feed's Domain."""
+        reader_name = self._resolve(reader_name)
         self._ensure_reader(reader_name)
-        session_client = self._client.reader(reader_name)
+        session_client = self._client._reader(reader_name)
         session = session_client.open(max_page_size)
         return FeedReader(session_client, session, self.key_codec, self.value_codec)
 
@@ -497,8 +513,8 @@ class Feed(Generic[K, V]):
         on_records: Callable[[List[FeedMessage[K, V]]], None],
         on_error: Optional[Callable[[WhitewaterError], None]],
     ):
-        return self._client.subscribe(
-            reader,
+        return self._client._subscribe(
+            self._resolve(reader),
             self.name,
             start,
             lambda records: on_records([self._decode(r) for r in records]),
@@ -557,14 +573,14 @@ class Feed(Generic[K, V]):
 
     def _ensure_writer(self, writer_name: str) -> None:
         try:
-            self._client.create_writer(writer_name, self.name)
+            self._client._create_writer(writer_name, self.name)
         except Refused as e:
             if "exists" not in str(e).lower():
                 raise
 
     def _ensure_reader(self, reader_name: str, start=None) -> None:
         try:
-            self._client.create_reader(reader_name, self.name, start)
+            self._client._create_reader(reader_name, self.name, start)
         except Refused as e:
             if "exists" not in str(e).lower():
                 raise

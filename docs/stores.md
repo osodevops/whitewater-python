@@ -6,12 +6,13 @@ RF3-replicated, Fjall-backed, and queryable from any Node. The SDK's
 projection, and every operation is an HTTP call with freshness evidence.
 
 ```python
-store = (StateStore.named("accounts.employees")
+accounts = client.domain("accounts")    # or client.create_domain("accounts")
+store = (accounts.state_store("employees")
          .add_key("passport", unique=True)   # one row per value
          .add_key("department"))             # value -> many rows
 
-client.state_stores.define(store)           # declares on the Control Plane
-                                            # and returns it bound
+accounts.define_state_store(store)           # declares on the Control Plane
+                                             # and returns it bound
 ```
 
 `add_key` records declaration intent used by `define` — named keys are
@@ -83,7 +84,7 @@ iteration's freshness evidence.
 
 ```python
 store.clear()                                # one journaled ClearAll
-client.state_stores.drop(store.name)         # or store.drop()
+accounts.drop_state_store("employees")       # or store.drop()
 ```
 
 - `clear` empties the store as one durable, idempotent mutation;
@@ -91,8 +92,8 @@ client.state_stores.drop(store.name)         # or store.drop()
 - `drop` tombstones the definition — the name cannot be recreated and
   every data path refuses. Rows already applied on replicas remain
   until a bounded reclaim pass.
-- Feed-sourced stores: `client.state_stores.define(spec, source=
-  "accounts.events")` materializes committed Feed history; `sync`/
+- Feed-sourced stores: `accounts.define_state_store(spec, source=
+  "events")` materializes committed Feed history; `sync`/
   `rebuild` are server-side operations, not SDK methods.
 
 ### Feed-sourced named keys
@@ -102,10 +103,10 @@ committed source record maps to typed lookup values. Every key carries
 an `Extractor`:
 
 ```python
-spec = (StateStore.named("accounts.tagged")
+spec = (accounts.state_store("tagged")
         .add_key("passport", unique=True, extractor=Extractor.metadata("pp"))
         .add_key("department", extractor=Extractor.json("dept")))
-store = client.state_stores.define(spec, source="accounts.events")
+store = accounts.define_state_store(spec, source="events")
 ```
 
 `Extractor.record_key()` reads the record's key,
@@ -152,7 +153,7 @@ client.commands([
 | `add_key` #11 / duplicate / blank | `ValueError` | Declaration contract (10-key bound, distinct names). |
 | `define` spec + `source` + bare named keys | `ValueError` | Feed-sourced keys need an `extractor` — checked before the call. |
 | `define` manual spec + `extractor` | `ValueError` | Extractors apply to feed-sourced stores only. |
-| Data op on unbound spec | `ValueError` | `StateStore.named` builds a spec; bind via `define` or `client.state_store(name)`. |
+| Data op on unbound spec | `ValueError` | `StateStore.named` builds a spec; bind via `define_state_store` or `domain.state_store(name)`. |
 | Undeclared named key / missing store | `Refused` (400) | Server-side contract — fix the declaration. |
 | `mutation_id` reused differently | `Conflict` (409) | Retry with the original contents or a fresh id. |
 | No quorum / replica down | `Unavailable` (503) | Retry — the journal needs a quorum to commit. |
