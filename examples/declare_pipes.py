@@ -69,7 +69,7 @@ ops.create_feed("panes")       # window emit feed
 # keys so pane rows stay enumerable without composite row keys.
 ops.define_state_store(ops.state_store("profiles"))
 ops.define_state_store(
-    ops.state_store("minute.totals").add_key("key").add_key("pane")
+    ops.state_store("minute.totals").add_non_unique_key("key").add_non_unique_key("pane")
 )
 ops.create_subscription("relay.sub", "events")
 ops.create_subscription("enrich.sub", "events")

@@ -45,8 +45,8 @@ def test_named_key_store_lifecycle_live():
 
     store = client._state_stores.define(
         StateStore.named(name)
-        .add_key("passport", unique=True)
-        .add_key("department")
+        .add_unique_key("passport")
+        .add_non_unique_key("department")
     )
 
     store.put(

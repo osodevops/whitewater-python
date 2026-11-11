@@ -8,14 +8,14 @@ projection, and every operation is an HTTP call with freshness evidence.
 ```python
 accounts = client.domain("accounts")    # or client.create_domain("accounts")
 store = (accounts.state_store("employees")
-         .add_key("passport", unique=True)   # one row per value
-         .add_key("department"))             # value -> many rows
+         .add_unique_key("passport")   # one row per value
+         .add_non_unique_key("department"))             # value -> many rows
 
 accounts.define_state_store(store)           # declares on the Control Plane
                                              # and returns it bound
 ```
 
-`add_key` records declaration intent used by `define` — named keys are
+`add_unique_key`/`add_non_unique_key` record declaration intent used by `define` — named keys are
 declared at creation; at most `StateStore.MAX_NAMED_KEYS` (10), unique
 or not. A named-key declaration only affects `define`; adding a key to
 an existing store has no effect server-side.
@@ -135,8 +135,8 @@ an `Extractor`:
 
 ```python
 spec = (accounts.state_store("tagged")
-        .add_key("passport", unique=True, extractor=Extractor.metadata("pp"))
-        .add_key("department", extractor=Extractor.json("dept")))
+        .add_unique_key("passport", extractor=Extractor.metadata("pp"))
+        .add_non_unique_key("department", extractor=Extractor.json("dept")))
 store = accounts.define_state_store(spec, source="events")
 ```
 
@@ -181,7 +181,7 @@ client.commands([
 
 | Where | Type | Meaning / remedy |
 |---|---|---|
-| `add_key` #11 / duplicate / blank | `ValueError` | Declaration contract (10-key bound, distinct names). |
+| `add_unique_key`/`add_non_unique_key`/`add_key` #11 / duplicate / blank | `ValueError` | Declaration contract (10-key bound, distinct names). |
 | `define` spec + `source` + bare named keys | `ValueError` | Feed-sourced keys need an `extractor` — checked before the call. |
 | `define` manual spec + `extractor` | `ValueError` | Extractors apply to feed-sourced stores only. |
 | Data op on unbound spec | `ValueError` | `StateStore.named` builds a spec; bind via `define_state_store` or `domain.state_store(name)`. |

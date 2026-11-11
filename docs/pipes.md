@@ -35,8 +35,8 @@ ops.create_subscription("orders.sub", "orders")
 from whitewater import Extractor
 
 store = (ops.state_store("customers")
-         .add_key("email", unique=True, extractor=Extractor.json("$.email"))
-         .add_key("tier", extractor=Extractor.json("$.tier")))
+         .add_unique_key("email", extractor=Extractor.json("$.email"))
+         .add_non_unique_key("tier", extractor=Extractor.json("$.tier")))
 ops.define_state_store(store, source="customer.changes")
 ```
 
@@ -90,7 +90,7 @@ enumerable without composite row keys:
 from whitewater import WindowAggregation, WindowTime
 
 ops.define_state_store(
-    ops.state_store("order.counts").add_key("key").add_key("pane")
+    ops.state_store("order.counts").add_non_unique_key("key").add_non_unique_key("pane")
 )
 
 ops.define_window_pipe(

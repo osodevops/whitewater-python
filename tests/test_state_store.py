@@ -90,8 +90,8 @@ def test_define_emits_named_keys_and_binds_the_facade(stub):
 
     spec = (
         StateStore.named("accounts.employees")
-        .add_key("passport", unique=True)
-        .add_key("department")
+        .add_unique_key("passport")
+        .add_non_unique_key("department")
     )
     store = client._state_stores.define(spec)
 
@@ -121,13 +121,13 @@ def test_define_feed_sourced_named_keys_need_extractors(stub):
     # A feed-sourced named key without a projection is a declaration bug.
     with pytest.raises(ValueError, match="require an extractor"):
         client._state_stores.define(
-            StateStore.named("accounts.s").add_key("k"),
+            StateStore.named("accounts.s").add_non_unique_key("k"),
             source="accounts.events",
         )
     # An extractor on a manual store is refused — puts carry the values.
     with pytest.raises(ValueError, match="manual store"):
         client._state_stores.define(
-            StateStore.named("accounts.m").add_key(
+            StateStore.named("accounts.m").add_non_unique_key(
                 "k", extractor=Extractor.metadata("pp")
             )
         )
@@ -140,8 +140,8 @@ def test_define_feed_sourced_emits_extractors(stub):
 
     spec = (
         StateStore.named("accounts.tagged")
-        .add_key("passport", unique=True, extractor=Extractor.metadata("pp"))
-        .add_key("department", extractor=Extractor.json("dept"))
+        .add_unique_key("passport", extractor=Extractor.metadata("pp"))
+        .add_non_unique_key("department", extractor=Extractor.json("dept"))
     )
     store = client._state_stores.define(spec, source="accounts.events")
 
@@ -180,9 +180,28 @@ def test_define_feed_sourced_emits_extractors(stub):
 def test_spec_validation_and_unbound_refusal(stub):
     _state, _url, _lock = stub
     with pytest.raises(ValueError, match="duplicate named key"):
-        StateStore.named("s.dup").add_key("k").add_key("k")
+        StateStore.named("s.dup").add_non_unique_key("k").add_non_unique_key("k")
     with pytest.raises(ValueError, match="unbound StateStore spec"):
         StateStore.named("s.unbound").get(b"k")
+
+
+def test_explicit_unique_and_non_unique_helpers_set_the_flag():
+    spec = (
+        StateStore.named("s.flags")
+        .add_unique_key("passport")
+        .add_non_unique_key("department")
+    )
+    assert spec.named_keys[0].unique is True
+    assert spec.named_keys[1].unique is False
+
+    feed_sourced = (
+        StateStore.named("s.fs")
+        .add_unique_key("pp", extractor=Extractor.metadata("pp"))
+        .add_non_unique_key("dept", extractor=Extractor.json("dept"))
+    )
+    assert feed_sourced.named_keys[0].unique is True
+    assert feed_sourced.named_keys[0].extractor is not None
+    assert feed_sourced.named_keys[1].unique is False
 
 
 def test_put_get_get_by_delete_carry_wire_shapes(stub):
@@ -313,8 +332,8 @@ def test_store_key_set_supports_all_inline_styles_and_single_string_fallback(stu
     accounts = client.domain("accounts")
     spec = (
         StateStore.named("employees")
-        .add_key("passport", unique=True)
-        .add_key("department")
+        .add_unique_key("passport")
+        .add_non_unique_key("department")
     )
     store = accounts.define_state_store(spec)
 

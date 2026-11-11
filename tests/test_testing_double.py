@@ -177,7 +177,7 @@ def test_temporary_fetch_and_records(riverbed, client):
 
 def test_state_store_manual_lifecycle(riverbed, client):
     store = client._state_stores.define(
-        StateStore.named("ops.profiles").add_key("department")
+        StateStore.named("ops.profiles").add_non_unique_key("department")
     )
     first = store.put("emp-1", "alice", named={"department": "eng"})
     assert not first.deduplicated
@@ -218,7 +218,7 @@ def test_state_store_mutation_id_dedupes(riverbed, client):
 
 def test_state_store_named_key_rules(riverbed, client):
     store = client._state_stores.define(
-        StateStore.named("ops.directory").add_key("email", unique=True)
+        StateStore.named("ops.directory").add_unique_key("email")
     )
     store.put("user-1", "alice", named={"email": "alice@corp.test"})
     with pytest.raises(Conflict):

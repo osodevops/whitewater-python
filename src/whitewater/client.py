@@ -1080,8 +1080,8 @@ class StateStore:
     rows. Declare it with named keys, then put/get/delete/iterate::
 
         store = (client.domain("accounts").state_store("employees")
-                 .add_key("passport", unique=True)
-                 .add_key("department"))
+                 .add_unique_key("passport")
+                 .add_non_unique_key("department"))
         client.domain("accounts").define_state_store(store)
 
         store.put(b"user-1", b"profile-1",
@@ -1194,6 +1194,20 @@ class StateStore:
             NamedKey(name=named_key, unique=unique, extractor=extractor)
         )
         return self
+
+    def add_unique_key(
+        self, named_key: str, extractor: Optional[Extractor] = None
+    ) -> "StateStore":
+        """Declare a **unique** named key — one value resolves to at
+        most one primary row (``add_key(named_key, unique=True)``)."""
+        return self.add_key(named_key, unique=True, extractor=extractor)
+
+    def add_non_unique_key(
+        self, named_key: str, extractor: Optional[Extractor] = None
+    ) -> "StateStore":
+        """Declare a **non-unique** named key — one value lists every
+        matching primary row (``add_key(named_key, unique=False)``)."""
+        return self.add_key(named_key, unique=False, extractor=extractor)
 
     @property
     def named_keys(self) -> List[NamedKey]:

@@ -243,7 +243,7 @@ StoreValue = Union[None, bool, int, str, bytes]
 class Extractor:
     """How a committed record projects to a typed field value — the
     ``IndexFieldSpec`` the wire carries. Declared on
-    ``StateStore.add_key(..., extractor=)`` for feed-sourced named keys
+    ``StateStore.add_unique_key/add_non_unique_key(..., extractor=)`` for feed-sourced named keys
     and on ``PipeOperation.enrich``/``window`` for the lookup/grouping
     Key; applied by server-side replay and drive. Build with the class
     factories; manual stores leave it unset and take values on each

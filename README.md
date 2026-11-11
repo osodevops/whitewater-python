@@ -207,13 +207,16 @@ store = (accounts.define_state_store(
 
         accounts.state_store("employees")
 
-        .add_key("passport", unique=True).add_key("department")))  # up to 10 named keys
+        .add_unique_key("passport").add_non_unique_key("department")))  # up to 10 named keys
 
 
 
+# named-key postings: a typed StoreKeySet subclass, a builder lambda,
+# a plain dict, or a single string for one declared named key —
 store.put("user-1", profile,
-
-          named={"passport": "P111", "department": "eng"})        # typed values
+          PassportKeySet(passport="P111", department="eng"))    # typed values
+store.put("user-1", profile,
+          named={"passport": "P111", "department": "eng"})      # dict form
 
 rows = store.get_by("department", "eng").rows                    # every match
 
@@ -404,7 +407,7 @@ classes are the explicit escape hatches for the same wire contract.
 | Temporary fetches | `Feed.fetch(after=, limit=)` / `FeedClient.temporary_fetch` — `after_event_time_ns` seeks, `new_only`, `tail` + `wait_ms` long-poll · `Feed.records` `Feed.load` |
 | Consumers | `feed.consumer(reader)` → `FeedConsumer`: `start_at` `max_page_size` `on_record` `on_error` `backoff` `last_error` `is_running` · `run` / `run_async` / `close` |
 | Subscription members | `domain.member_client(name)` → `join` `claim` `renew` `release` `fetch` `ack` — shared progress + RF3 work leases · `domain.subscribe(...)` managed loop |
-| StateStores | `domain.state_store(name)` / `StateStore.named(name)` → `view` `view_types` `add_key` `named_keys` `put` `get` `get_by` `find` `find_by` `get_or_default` `delete` `page` `iterate` `clear` `drop` · `domain.define_state_store` `domain.drop_state_store` |
+| StateStores | `domain.state_store(name)` / `StateStore.named(name)` → `view` `view_types` `add_unique_key` `add_non_unique_key` `named_keys` `put` `get` `get_by` `find` `find_by` `get_or_default` `delete` `page` `iterate` `clear` `drop` · `domain.define_state_store` `domain.drop_state_store` |
 | Indexes | `domain.query_index(name, IndexPredicate)` → `IndexPage` · `IndexPredicate.exact/prefix/range` + `IndexBound` |
 | Pipes | `domain.define_forward_pipe` `domain.define_enrich_pipe` `domain.define_window_pipe` — strings in-Domain, `Feed`/`SubscriptionRef`/`StateStore`/`Scoped.absolute` cross-Domain · `domain.pipe(name)` → `describe` `pause` `resume` `drop` · `domain.pipe_infos()` · `PipeOperation` `WindowAggregation` `WindowTime` · durations are `datetime.timedelta` |
 | Catalog lifecycle | Domains/roles on `client` (`create_domain` `describe_domain` `rename_domain` `drop_domain` `list_domains` `list_roles` `list_grants`) · per-resource `domain.create_*` `describe_*` `rename_*` `drop_*` for Feed, Writer, Reader, Subscription, Pipe, StateStore · `domain.open_writer_session` `domain.seek_reader` |

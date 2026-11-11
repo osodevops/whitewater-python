@@ -196,7 +196,7 @@ Two managed wrappers sit on top of those primitives:
   `sink` is any `records -> None` callback.
 - **`shop.state_store(name)` / `StateStore.named(name)`** — the thin
   facade over the node-side StateStore (durable, RF3, Fjall): declare
-  with `shop.define_state_store(spec)` after `add_key(name, unique=)`
+  with `shop.define_state_store(spec)` after `add_unique_key`/`add_non_unique_key`
   (up to 10 named secondary keys), then `put(key, payload, named={...})`
   with typed values, `get(key, strict=)`, `get_by(named_key, value)`
   (non-unique — returns `StoreRows`), `delete`, `iterate`, `page`,
