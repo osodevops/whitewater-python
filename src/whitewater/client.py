@@ -36,6 +36,8 @@ from .models import (
     StorePage,
     StoreRow,
     StoreRows,
+    AbstractStoreKeySet,
+    StoreKeySet,
     StoreValue,
     TemporaryFetchOptions,
     TemporaryFetchPage,
@@ -1098,6 +1100,12 @@ class StateStore:
     """
 
     MAX_NAMED_KEYS = MAX_NAMED_KEYS
+    _declared_default_keys: Dict[str, str] = {}
+
+    @classmethod
+    def _register_default_key(cls, store_name: str, default_key: str) -> None:
+        if store_name and default_key and default_key.strip():
+            cls._declared_default_keys[_dotted(store_name)] = default_key
 
     def __init__(
         self,
@@ -1105,12 +1113,16 @@ class StateStore:
         name: str,
         key_codec=None,
         value_codec=None,
+        default_key: Optional[str] = None,
+        key_set_cls=None,
     ):
         self._transport = transport
         self.name = _dotted(name)
         self._named_keys: List[NamedKey] = []
         self._key_codec = key_codec or codecs.utf8()
         self._value_codec = value_codec or codecs.utf8()
+        self._default_key = default_key
+        self._key_set_cls = key_set_cls
 
     @staticmethod
     def named(name: str) -> "StateStore":
@@ -1125,7 +1137,34 @@ class StateStore:
             self.name,
             key_codec or self._key_codec,
             value_codec or self._value_codec,
+            default_key=self._default_key,
+            key_set_cls=self._key_set_cls,
         )
+
+    def with_default_key(self, default_key_name: str) -> "StateStore":
+        """Bind the default secondary-key name used when a single ``str`` is passed to :meth:`put`."""
+        if not default_key_name or not default_key_name.strip():
+            raise ValueError("default_key_name must not be blank")
+        self._default_key = default_key_name
+        return self
+
+    def with_key_set(self, key_set_cls) -> "StateStore":
+        """Bind a :class:`StoreKeySet` subclass so ``store.put(k, v, lambda ks: ...)`` instantiates ``key_set_cls``."""
+        return StateStore(
+            self._transport,
+            self.name,
+            self._key_codec,
+            self._value_codec,
+            default_key=self._default_key,
+            key_set_cls=key_set_cls,
+        )
+
+    def _resolve_default_key_name(self) -> str:
+        if self._default_key:
+            return self._default_key
+        if self._named_keys:
+            return self._named_keys[0].name
+        return self._declared_default_keys.get(self.name, "default")
 
     def view_types(self, key_type, value_type) -> "StateStore":
         """``view`` by Python types (``str``/``bytes``/``dict``/classes)."""
@@ -1200,11 +1239,22 @@ class StateStore:
         self,
         key,
         payload,
-        named: Optional[Dict[str, Any]] = None,
+        named: Any = None,
         mutation_id: Optional[uuid.UUID] = None,
     ) -> MutationResult:
-        """Insert or replace one row. ``named`` maps a declared named key
-        to a typed value (or a list for multi-component postings)."""
+        """Insert or replace one row. ``named`` accepts a :class:`StoreKeySet`,
+        a builder callable ``lambda k: ...``, a single ``str`` default secondary
+        key value, or a ``dict``."""
+        if isinstance(named, AbstractStoreKeySet) or hasattr(named, "to_dict"):
+            resolved_named = named.to_dict()
+        elif callable(named):
+            ks = (self._key_set_cls or StoreKeySet)()
+            named(ks)
+            resolved_named = ks.to_dict()
+        elif isinstance(named, str):
+            resolved_named = {self._resolve_default_key_name(): named}
+        else:
+            resolved_named = named
         body: Dict[str, Any] = {
             "store": self.name,
             "mutation_id": str(mutation_id or uuid.uuid4()),
@@ -1214,8 +1264,8 @@ class StateStore:
                 "payload_base64": _wire.b64(self._value_codec.encode(payload)),
             },
         }
-        if named:
-            body["op"]["named"] = _wire.named_values(named)
+        if resolved_named:
+            body["op"]["named"] = _wire.named_values(resolved_named)
         return _wire.mutation_result(
             self._bound().post("/v1/state-stores/mutate", body)
         )
@@ -1418,6 +1468,8 @@ class StateStoresClient:
         if request_id is not None:
             body["request_id"] = str(request_id)
         _wire.control_execution(self._transport.post("/v1/admin/commands", body))
+        if spec.named_keys:
+            StateStore._register_default_key(spec.name, spec.named_keys[0].name)
         spec._transport = self._transport
         return spec
 

@@ -20,9 +20,40 @@ declared at creation; at most `StateStore.MAX_NAMED_KEYS` (10), unique
 or not. A named-key declaration only affects `define`; adding a key to
 an existing store has no effect server-side.
 
-## Writing
+## Writing & `AbstractStoreKeySet`
+
+Define a typed `AbstractStoreKeySet` subclass once for your store's secondary keys so every `put` is strongly typed, or pass keyword arguments / inline builders / dicts:
 
 ```python
+class PassportKeySet(AbstractStoreKeySet):
+    def passport(self, v: str) -> "PassportKeySet":
+        return self.put("passport", v)
+
+    def department(self, v: str) -> "PassportKeySet":
+        return self.put("department", v)
+
+    @classmethod
+    def with_(cls, passport: str, department: str) -> "PassportKeySet":
+        return cls().passport(passport).department(department)
+
+    @classmethod
+    def with_passport(cls, passport: str) -> "PassportKeySet":
+        return cls().passport(passport)
+
+# Python keyword style:
+store.put("emp-1", profile, PassportKeySet(passport="P123", department="eng"))
+
+# Static factory / fluent chaining:
+store.put("emp-1", profile, PassportKeySet.with_("P123", "eng"))
+store.put("emp-1", profile, PassportKeySet.with_passport("P123").department("eng"))
+
+# Lambda / builder block:
+store.put("emp-1", profile, PassportKeySet.of(lambda k: k.passport("P123").department("eng")))
+
+# Single default string fallback (maps to the store's first declared key):
+store.put("emp-1", profile, profile.passport)
+
+# Plain dict is still supported for dynamic keys:
 store.put("user-1", profile,
           named={"passport": "P111", "department": "eng"})
 store.put("user-2", profile2,

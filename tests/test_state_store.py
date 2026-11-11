@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from whitewater import Extractor, StateStore, WhitewaterClient
+from whitewater import AbstractStoreKeySet, Extractor, StateStore, StoreKeySet, WhitewaterClient
 
 COMMANDS_OK = {
     "request_id": "00000000-0000-7000-8000-000000000006",
@@ -280,3 +280,69 @@ def test_iterate_pages_until_exhausted_then_clear_and_drop(stub):
         "kind": "state_store",
         "name": "accounts.employees",
     }
+
+
+class PassportKeySet(AbstractStoreKeySet):
+    def set_passport(self, v: str) -> "PassportKeySet":
+        return self.put("passport", v)
+
+    def set_department(self, v: str) -> "PassportKeySet":
+        return self.put("department", v)
+
+    def passport(self, v: str) -> "PassportKeySet":
+        return self.set_passport(v)
+
+    def department(self, v: str) -> "PassportKeySet":
+        return self.set_department(v)
+
+    @classmethod
+    def with_(cls, passport: str, department: str) -> "PassportKeySet":
+        return cls().set_passport(passport).set_department(department)
+
+    @classmethod
+    def with_passport(cls, passport: str) -> "PassportKeySet":
+        return cls().set_passport(passport)
+
+
+def test_store_key_set_supports_all_inline_styles_and_single_string_fallback(stub):
+    state, url, _lock = stub
+    state["bodies"]["/v1/admin/commands"] = COMMANDS_OK
+    state["bodies"]["/v1/state-stores/mutate"] = MUTATION
+    client = WhitewaterClient(api_key="test-key", endpoints=[url])
+
+    accounts = client.domain("accounts")
+    spec = (
+        StateStore.named("employees")
+        .add_key("passport", unique=True)
+        .add_key("department")
+    )
+    store = accounts.define_state_store(spec)
+
+    def last_named():
+        op = bodies(state, "/v1/state-stores/mutate")[-1]["op"]
+        return {entry["name"]: entry["values"][0]["value"] for entry in op["named"]}
+
+    # Python keyword init: PassportKeySet(passport="P123", department="eng")
+    store.put("emp-1", "alice", PassportKeySet(passport="P123", department="eng"))
+    assert last_named() == {"passport": "P123", "department": "eng"}
+
+    # 1A: Static factory PassportKeySet.with_("P222", "ops")
+    store.put("emp-2", "bob", PassportKeySet.with_("P222", "ops"))
+    assert last_named() == {"passport": "P222", "department": "ops"}
+
+    # 1B: Static starter + fluent chaining
+    store.put("emp-3", "cara", PassportKeySet.with_passport("P333").department("eng"))
+    assert last_named() == {"passport": "P333", "department": "eng"}
+
+    # 2A: Lambda on KeySet class
+    store.put("emp-4", "dan", PassportKeySet.of(lambda k: k.passport("P444").department("sales")))
+    assert last_named() == {"passport": "P444", "department": "sales"}
+
+    # 2B: Store typed with KeySet class via with_key_set
+    keyed = store.with_key_set(PassportKeySet)
+    keyed.put("emp-5", "eve", lambda k: k.passport("P555").department("qa"))
+    assert last_named() == {"passport": "P555", "department": "qa"}
+
+    # 3: Single default string fallback -> maps to first declared key ("passport")
+    store.put("emp-6", "frank", "P666")
+    assert last_named() == {"passport": "P666"}

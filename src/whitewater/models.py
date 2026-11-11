@@ -347,3 +347,64 @@ class MutationResult:
     mutation_id: uuid.UUID
     sequence: int
     deduplicated: bool
+
+
+class AbstractStoreKeySet:
+    """Base class for typed :class:`StateStore` secondary-key sets.
+
+    Supports keyword initialization (``PassportKeySet(passport="P123", department="eng")``),
+    fluent chaining (``PassportKeySet.with_passport("P123").department("eng")``),
+    static factories (``PassportKeySet.with_("P123", "eng")``), and lambda builders
+    (``PassportKeySet.of(lambda k: k.passport("P123").department("eng"))``).
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        self._keys: Dict[str, Any] = {}
+        for name, value in kwargs.items():
+            self.put(name, value)
+
+    def put(self, name: str, value: Any):
+        if not name or not name.strip():
+            raise ValueError("secondary key name must not be blank")
+        self._keys[name] = value
+        return self
+
+    def get(self, name: str) -> Any:
+        return self._keys.get(name)
+
+    @property
+    def is_empty(self) -> bool:
+        return len(self._keys) == 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return dict(self._keys)
+
+    def to_map(self) -> Dict[str, Any]:
+        return self.to_dict()
+
+    @classmethod
+    def of(cls, builder_or_key: Any = None, value: Any = None, **kwargs: Any):
+        ks = cls()
+        if callable(builder_or_key):
+            builder_or_key(ks)
+        elif isinstance(builder_or_key, str):
+            ks.put(builder_or_key, value)
+        elif isinstance(builder_or_key, dict):
+            for k, v in builder_or_key.items():
+                ks.put(k, v)
+        elif builder_or_key is not None:
+            raise TypeError("StoreKeySet.of expects a callable, key name, dict, or kwargs")
+        for k, v in kwargs.items():
+            ks.put(k, v)
+        return ks
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, AbstractStoreKeySet) and self._keys == other._keys
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}({self._keys!r})"
+
+
+class StoreKeySet(AbstractStoreKeySet):
+    """Concrete general-purpose :class:`AbstractStoreKeySet`."""
+    pass
