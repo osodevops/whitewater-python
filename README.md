@@ -75,7 +75,7 @@ client = WhitewaterClient(
 
 See [docs/stores.md](docs/stores.md) for the full store guide.
 
-### Typed Domains — navigate, don't concatenate
+## Typed Domains — navigate, don't concatenate
 
 A Domain owns every Feed it prefixes (`shop` owns `shop.orders`), so the
 friendliest surface navigates domain → feed → reader/writer instead
@@ -146,7 +146,7 @@ shop.clear_feed_schema("orders")         # reverts to inheritance
 assignments. Formats today: `json`, `jsonschema`, `avro`, `protobuf`, `text`, `bytes`,
 or `custom.<name>` — compatibility enforcement is still a no-op.
 
-### Permanent consumers — the Kafka loop without the plumbing
+## Permanent consumers — the Kafka loop without the plumbing
 
 `feed.consumer(name)` binds the durable named Reader (the
 consumer-group equivalent) and owns the fetch → deliver → ack cycle:
