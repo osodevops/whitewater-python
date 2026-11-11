@@ -86,6 +86,14 @@ _ENDPOINTS: Dict[str, Tuple[str, str]] = {
 
 TRANSIENT_ATTEMPTS = 120
 TRANSIENT_INTERVAL = 0.5
+# Wall-clock bound on the transient budget: 120 attempts was meant as a
+# ~one-minute window, but an unavailable endpoint can burn a whole
+# transport timeout per attempt — cap elapsed time so a dead Riverbed
+# fails instead of grinding for hours.
+TRANSIENT_BUDGET_S = 120.0
+# The chaos driver's own internal waits are bounded to a few minutes;
+# give it headroom but never let a wedged hook stall the gate.
+CHAOS_TIMEOUT_S = 420
 
 
 class TransportError(Exception):
@@ -329,12 +337,18 @@ class Runner:
         action = op
         for key in sorted(rendered):
             action += " " + str(rendered[key])
-        run = subprocess.run(
-            f"{self.chaos_cmd} {action}",
-            shell=True,
-            capture_output=True,
-            text=True,
-        )
+        try:
+            run = subprocess.run(
+                f"{self.chaos_cmd} {action}",
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=CHAOS_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired:
+            raise AssertionError(
+                f"chaos hook timed out after {CHAOS_TIMEOUT_S}s"
+            ) from None
         if run.returncode != 0:
             raise AssertionError(
                 f"chaos hook failed: {run.returncode}: {run.stdout}{run.stderr}"
@@ -445,13 +459,14 @@ class Runner:
 
             attempt = 0
             transient = 0
+            transient_deadline = time.monotonic() + TRANSIENT_BUDGET_S
             status, body = 0, None
             while True:
                 args = self.substitute(args_template)
                 try:
                     status, body = self.dispatch(op, args)
                 except TransportError:
-                    if transient < TRANSIENT_ATTEMPTS:
+                    if transient < TRANSIENT_ATTEMPTS and time.monotonic() < transient_deadline:
                         transient += 1
                         time.sleep(TRANSIENT_INTERVAL)
                         continue
@@ -460,7 +475,7 @@ class Runner:
                         time.sleep(poll_interval_ms / 1000)
                         continue
                     raise AssertionError(f"step {index} ({op}): transport exhausted")
-                if status >= 500 and transient < TRANSIENT_ATTEMPTS:
+                if status >= 500 and transient < TRANSIENT_ATTEMPTS and time.monotonic() < transient_deadline:
                     transient += 1
                     time.sleep(TRANSIENT_INTERVAL)
                     continue
