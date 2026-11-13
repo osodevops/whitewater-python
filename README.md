@@ -2,7 +2,7 @@
 
 
 
-Python SDK for Whitewater Riverbeds. Implements the versioned
+Python SDK for Whitewater. Implements the versioned
 
 `whitewater-protocol` wire contract defined in the main repository under
 
